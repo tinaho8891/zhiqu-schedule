@@ -83,8 +83,9 @@ function analyze(cells = S.cells) {
     if (!e) continue;
     const b = blockBy(e.block); if (!b) continue;
     const day = A[ds] || (A[ds] = { am: { cov: {}, started: false }, pm: { cov: {}, started: false } });
-    const sh = day[b.shift]; sh.started = true;
-    for (const s of parse(v).stores) (sh.cov[s] || (sh.cov[s] = [])).push(e);
+    const sh = day[b.shift], st = parse(v).stores;
+    if (st.length) sh.started = true; // 只填 X（例如畫休匯入）不算開始排
+    for (const s of st) (sh.cov[s] || (sh.cov[s] = [])).push(e);
   }
   return A;
 }
@@ -141,6 +142,8 @@ function startData() {
 function stopData() {
   S.unsubs.forEach(f => f && f()); S.unsubs = [];
   Object.values(S.monthSubs || {}).forEach(f => f && f()); S.monthSubs = {}; S.monthCells = {};
+  Object.values(S.availSubs || {}).forEach(f => f && f()); S.availSubs = {}; S.availDocs = {}; S.avail = {};
+  if (S.leaveCfgSub) S.leaveCfgSub(); if (S.leavesSub) S.leavesSub(); S.leaveCfgSub = S.leavesSub = null; S.leavesYm = null;
   S.dataOn = false; S.master = undefined; S.employees = undefined; S.cells = {}; S.monthLoaded = false;
 }
 // 依目前畫面需要的月份訂閱資料（總覽的 14 天可能跨月）
@@ -152,13 +155,17 @@ function neededMonths() {
 function watchMonth() {
   S.monthSubs = S.monthSubs || {}; S.monthCells = S.monthCells || {};
   const need = neededMonths();
-  for (const ym of Object.keys(S.monthSubs)) if (!need.has(ym)) { S.monthSubs[ym](); delete S.monthSubs[ym]; delete S.monthCells[ym]; }
+  for (const ym of Object.keys(S.monthSubs)) if (!need.has(ym)) { S.monthSubs[ym](); delete S.monthSubs[ym]; delete S.monthCells[ym]; if (S.availSubs?.[ym]) { S.availSubs[ym](); delete S.availSubs[ym]; delete S.availDocs[ym]; } }
+  S.availSubs = S.availSubs || {}; S.availDocs = S.availDocs || {};
+  for (const ym of need) if (!S.availSubs[ym] && S.store.watchDoc) S.availSubs[ym] = S.store.watchDoc(`avail/${ym}`, d => { S.availDocs[ym] = d?.cells || {}; S.avail = Object.assign({}, ...Object.values(S.availDocs)); render(); });
   const merge = () => {
     S.cells = Object.assign({}, ...Object.values(S.monthCells));
     S.monthLoaded = [...need].every(ym => S.monthCells[ym]);
   };
   for (const ym of need) if (!S.monthSubs[ym]) {
-    S.monthSubs[ym] = S.store.watchMonth(ym, c => { if (!S.monthSubs[ym]) return; S.monthCells[ym] = c; merge(); render(); });
+    S.monthSubs[ym] = () => {};
+    const u = S.store.watchMonth(ym, c => { if (!S.monthSubs[ym]) return; S.monthCells[ym] = c; merge(); render(); });
+    if (S.monthSubs[ym]) S.monthSubs[ym] = u; else u();
   }
   merge();
 }
@@ -187,7 +194,7 @@ function render() {
   renderUser();
   $(".month-nav").style.visibility = S.tab === "overview" ? "hidden" : "";
   document.querySelectorAll("#tabs [data-admin]").forEach(b => b.hidden = !isAdmin());
-  if (S.tab === "settings" && !isAdmin()) S.tab = "overview";
+  if ((S.tab === "settings" || S.tab === "leave") && !isAdmin()) S.tab = "overview";
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === S.tab));
 
   if (S.user === undefined) { main.innerHTML = `<div class="loading">載入中…</div>`; return; }
@@ -204,6 +211,7 @@ function render() {
   else if (S.tab === "grid") main.innerHTML = gridHtml();
   else if (S.tab === "day") main.innerHTML = dayHtml();
   else if (S.tab === "settings") main.innerHTML = settingsHtml();
+  else if (S.tab === "leave") main.innerHTML = leaveHtml();
   bindMain();
 
   const sc2 = main.querySelector(".scroll");
@@ -307,7 +315,8 @@ function gridHtml() {
       if (p.stores.length) { work++; cnt += p.stores.length; }
       const inner = p.off && !p.stores.length ? "休"
         : p.stores.map(s => `<span class="st">${esc(s)}</span>`).join("") + p.unknown.map(u => `<span class="st unk" title="無法辨識的門市名稱">${esc(u)}</span>`).join("") + (p.notes.length ? `<div class="note">${esc(p.notes.join(" "))}</div>` : "");
-      return `<td class="c ${p.off && !p.stores.length ? "off" : ""}" data-e="${e.id}" data-ds="${d.ds}" title="${esc(e.name + " " + dLabel(d.ds) + (v ? "：" + v : ""))}">${inner}</td>`;
+      const av = avOf(d.ds, e.id), bad = av && p.stores.length && avBad(av, b.shift);
+      return `<td class="c ${p.off && !p.stores.length ? "off" : ""} ${av ? "hasav" : ""} ${bad ? "avbad" : ""}" data-e="${e.id}" data-ds="${d.ds}" title="${esc(e.name + " " + dLabel(d.ds) + (v ? "：" + v : "") + (av ? "\n" + AVL[av] : ""))}">${avTag(av)}${inner}</td>`;
     }).join("");
     return `<tr><td class="sticky">${esc(e.name)}${e.active === false ? ' <span class="muted small">(停用)</span>' : ""}</td>${tds}<td class="tot">${work}天<br><span class="small">${cnt}店次</span></td></tr>`;
   }).join("");
@@ -345,10 +354,10 @@ function dayHtml() {
         else on.push([e, p]);
       }
       staff += `<div class="hubtitle">${esc(b.name)}</div>`;
-      staff += on.map(([e, p]) => `<div class="staff"><span class="nm">${esc(e.name)}</span><span>${p.stores.map(s => `<span class="st">${esc(s)}</span>`).join("")}${p.unknown.map(u => `<span class="st unk">${esc(u)}</span>`).join("")}${p.notes.length ? ` <span class="note">${esc(p.notes.join(" "))}</span>` : ""}</span>
+      staff += on.map(([e, p]) => `<div class="staff"><span class="nm">${esc(e.name)}${avTag(avOf(ds, e.id))}</span><span>${p.stores.map(s => `<span class="st">${esc(s)}</span>`).join("")}${p.unknown.map(u => `<span class="st unk">${esc(u)}</span>`).join("")}${p.notes.length ? ` <span class="note">${esc(p.notes.join(" "))}</span>` : ""}</span>
         <span class="ct">${p.stores.length} 店 ${isAdmin() ? `<button class="btn small" data-edit="${e.id}">改</button>` : ""}</span></div>`).join("") || `<div class="muted small">今天沒有人上班</div>`;
       if (off.length) staff += `<div class="small muted" style="margin-top:4px">休：${off.map(e => esc(e.name)).join("、")}</div>`;
-      if (none.length) staff += `<div class="small muted">未填：${none.map(e => isAdmin() ? `<a href="#" data-edit="${e.id}">${esc(e.name)}</a>` : esc(e.name)).join("、")}</div>`;
+      if (none.length) staff += `<div class="small muted">未填：${none.map(e => (isAdmin() ? `<a href="#" data-edit="${e.id}">${esc(e.name)}</a>` : esc(e.name)) + avTag(avOf(ds, e.id))).join("、")}</div>`;
     }
     return `<div class="card"><h3>${SHIFT[sh]} ${m == null ? `<span class="muted small">（尚未開始排）</span>` : m.length ? `<span style="color:var(--miss)">漏排 ${m.length} 家</span>` : `<span style="color:var(--ok)">全部排滿 ✓</span>`}</h3>
       ${m?.length ? `<div class="misslist">${m.map(s => `<button class="mchip" data-assign="${esc(s)}" data-sh="${sh}">${esc(s)}</button>`).join("")}</div><div class="muted small">點紅色門市可以直接指派給今天上班的人</div>` : ""}
@@ -451,6 +460,10 @@ function onMainClick(e) {
   if ((el = q("[data-assign]"))) { openAssign(el.dataset.assign, S.day, el.dataset.sh); return; }
   if ((el = q("[data-edit]"))) { e.preventDefault(); openCellEditor(el.dataset.edit, S.day); return; }
   // 設定
+  if ((el = q("#lvOpen"))) return leaveOpen(true);
+  if ((el = q("#lvClose"))) return leaveOpen(false);
+  if ((el = q("#lvImport"))) return leaveImport();
+  if ((el = q("#lvCopy"))) { const i = $("#lvLink"); i.select(); navigator.clipboard?.writeText(i.value).then(() => toast("已複製網址"), () => toast("請手動複製")); return; }
   if ((el = q("#addStore"))) return addStore();
   if ((el = q("[data-sdel]"))) return delStore(el.dataset.sdel);
   if ((el = q("#saveAliases"))) return saveAliases();
@@ -465,6 +478,7 @@ function onMainClick(e) {
 function onMainChange(e) {
   const t = e.target;
   if (t.id === "onlyMiss") { S.onlyMissing = t.checked; render(); return; }
+  if (t.id === "lvYm" && t.value) { S.leaveYmSel = t.value; watchLeaveList(); render(); return; }
   if (t.id === "dPick" && t.value) { goDay(t.value.replace(/-/g, "")); return; }
   if (t.id === "restoreFile") return importBackup(e);
   if (t.dataset.srename !== undefined) return renameStore(t.dataset.srename, t.value.trim());
@@ -518,7 +532,7 @@ function openCellEditor(eid, ds) {
       }).join("")}</div>`;
     }).join("");
     m.innerHTML = `<h2>${esc(e.name)}・${dLabel(ds)}</h2>
-      <div class="sub">${esc(b.name)}｜紅框＝這班還沒人負責的門市，灰字＝已經由誰負責</div>
+      <div class="sub">${esc(b.name)}｜紅框＝這班還沒人負責的門市，灰字＝已經由誰負責${avOf(ds, eid) ? `<br><b class="avline av-${avOf(ds, eid)}">${AVL[avOf(ds, eid)]}</b>` : ""}</div>
       <div class="row"><button class="btn ${st.off ? "primary" : ""}" id="cOff">休假 (X)</button><button class="btn" id="cClear">清空</button>
         <span class="muted small">目前：<b>${esc(compose(st.stores, st.off, st.note) || "（空白）")}</b></span></div>
       ${groups}
@@ -566,15 +580,17 @@ function openAssign(store, ds, sh) {
     const hub = storeHub(store);
     const cands = S.employees.filter(e => blockBy(e.block)?.shift === sh && !cur.some(c => c.id === e.id)).map(e => {
       const v = S.cells[ds + "_" + e.id], p = parse(v);
-      const status = !v ? (e.active === false ? -1 : 1) : p.off && !p.stores.length ? 2 : 0;
-      return { e, p, status, same: blockBy(e.block).hub === hub };
+      const av = avOf(ds, e.id);
+      let status = !v ? (e.active === false ? -1 : 1) : p.off && !p.stores.length ? 2 : 0;
+      if (status >= 0 && avBad(av, sh) && status < 2) status = 3;
+      return { e, p, status, av, same: blockBy(e.block).hub === hub };
     }).filter(c => c.status >= 0).sort((a, b) => a.status - b.status || (b.same - a.same) || a.p.stores.length - b.p.stores.length);
-    const lbl = ["上班中", "未填", "休假"];
+    const lbl = ["上班中", "未填", "休假", "畫休不能上"];
     m.innerHTML = `<h2>${esc(store)}・${dLabel(ds)} ${SHIFT[sh]}</h2>
       <div class="sub">${esc(hubName(hub))}｜${cur.length ? "目前負責：" + cur.map(x => esc(x.name)).join("、") : `<b style="color:var(--miss)">尚未有人負責</b>`}</div>
       ${cur.length && isAdmin() ? `<div class="row" style="margin-bottom:10px">${cur.map(x => `<button class="btn small danger" data-rm="${x.id}">把 ${esc(x.name)} 移除</button>`).join("")}</div>` : ""}
       ${isAdmin() ? `<div class="pgroup">指派給（同組、今天上班、負責店數少的排前面）</div>
-      <table class="list">${cands.map(c => `<tr><td><b>${esc(c.e.name)}</b> <span class="muted small">${esc(blockBy(c.e.block).name)}</span></td>
+      <table class="list">${cands.map(c => `<tr><td><b>${esc(c.e.name)}</b>${avTag(c.av)} <span class="muted small">${esc(blockBy(c.e.block).name)}</span></td>
         <td>${c.p.stores.map(s => `<span class="st">${esc(s)}</span>`).join("") || `<span class="muted small">${lbl[c.status]}</span>`}</td>
         <td style="text-align:right"><button class="btn small ${c.status === 0 ? "primary" : ""}" data-add="${c.e.id}">指派</button></td></tr>`).join("")}</table>` : ""}
       <div class="actions"><span class="spacer"></span><button class="btn" id="aClose">關閉</button></div>`;
@@ -751,4 +767,115 @@ async function exportExcel() {
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), b.name.slice(0, 30));
   }
   X.writeFile(wb, `智取排班_${S.ym}.xlsx`);
+}
+
+/* ================= 畫休（主管端） ================= */
+const AV = { off: "休", am: "早", pm: "晚", any: "皆" };
+const AVL = { off: "畫休：休假", am: "畫休：只能早班", pm: "畫休：只能晚班", any: "畫休：早晚都可以" };
+const avOf = (ds, eid) => (S.avail || {})[ds + "_" + eid];
+// 畫休和這個班別衝突嗎（休假、或只能另一個班）
+const avBad = (av, shift) => av === "off" || (av === "am" && shift === "pm") || (av === "pm" && shift === "am");
+const avTag = av => av ? `<span class="av av-${av}" title="${AVL[av]}">${AV[av]}</span>` : "";
+function nextYm() { const d = new Date(); return `${new Date(d.getFullYear(), d.getMonth() + 1, 1).getFullYear()}-${pad(new Date(d.getFullYear(), d.getMonth() + 1, 1).getMonth() + 1)}`; }
+function leaveYm() { return S.leaveYmSel || S.leaveCfg?.ym || nextYm(); }
+function watchLeave() {
+  if (!isAdmin() || !S.store?.watchDoc) return;
+  if (!S.leaveCfgSub) { S.leaveCfgSub = () => {}; const u = S.store.watchDoc("config/leave", c => { S.leaveCfg = c; setTimeout(() => { watchLeaveList(); if (S.tab === "leave") render(); }); }); S.leaveCfgSub = u; }
+  watchLeaveList();
+}
+function watchLeaveList() {
+  const ym = leaveYm();
+  if (S.leavesYm === ym) return;
+  if (S.leavesSub) S.leavesSub();
+  S.leavesYm = ym; S.leaves = undefined;
+  S.leavesSub = S.store.watchLeaves(ym, l => { if (S.leavesYm !== ym) return; S.leaves = l; if (S.tab === "leave") setTimeout(render); });
+}
+function leaveLink() { return location.href.split("#")[0].split("?")[0].replace(/[^/]*$/, "") + "leave.html"; }
+function leaveHtml() {
+  watchLeave();
+  const c = S.leaveCfg, ym = leaveYm(), open = !!(c && c.open && c.ym === ym);
+  const days = monthDays(ym), subs = S.leaves || [];
+  const byE = Object.fromEntries(subs.map(x => [x.eid, x]));
+  const act = S.employees.filter(e => e.active !== false);
+  const done = act.filter(e => byE[e.id]), todo = act.filter(e => !byE[e.id]);
+  const table = blocks().map(b => {
+    const list = S.employees.filter(e => e.block === b.key && (e.active !== false || byE[e.id]));
+    if (!list.length) return "";
+    return `<tr class="hub"><td class="sticky" colspan="2">${esc(b.name)}</td><td colspan="${days.length}"></td></tr>` + list.map(e => {
+      const x = byE[e.id], t = x?.submittedAt ? new Date(x.submittedAt) : null;
+      return `<tr><td class="sticky">${esc(e.name)}${x?.note ? ` <span class="notei" title="${esc(x.note)}">💬</span>` : ""}</td>
+        <td class="sub">${t ? `${t.getMonth() + 1}/${t.getDate()} ${pad(t.getHours())}:${pad(t.getMinutes())}${x.late ? ' <span class="late">逾期</span>' : ""}` : '<span class="todo">未送出</span>'}</td>
+        ${days.map(d => { const v = x?.days?.[d.ds]; return `<td class="lvc ${v ? "c-" + v : ""}">${v ? AV[v] : ""}</td>`; }).join("")}</tr>`;
+    }).join("");
+  }).join("");
+  const [yy, mm] = ym.split("-");
+  return `<div class="grid2">
+    <div class="card"><h3>畫休設定 ${open ? '<span class="okpill">開放中</span>' : '<span class="todo">未開放</span>'}</h3>
+      <div class="row"><label>畫休月份<br><input type="month" id="lvYm" value="${ym}"></label>
+        <label>截止日<br><input type="date" id="lvDl" value="${c?.ym === ym && c.deadline ? isoOf(c.deadline) : ""}"></label>
+        <label>每人最多休幾天<br><input type="text" id="lvMax" inputmode="numeric" style="width:80px" value="${c?.ym === ym && c.maxOff ? c.maxOff : ""}" placeholder="不限"></label></div>
+      <label class="small muted" style="display:block;margin-top:8px">給員工的說明（選填）</label>
+      <input type="text" id="lvMsg" style="width:100%" value="${esc(c?.ym === ym ? c.note || "" : "")}" placeholder="例如：國定假日請優先排班">
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="lvOpen">${open ? "更新設定" : "開放畫休"}</button>
+        ${open ? '<button class="btn danger" id="lvClose">關閉畫休</button>' : ""}
+      </div>
+      <p class="muted small">開放時會把目前「啟用」的人員名單給員工選。關閉後員工就不能再改。</p>
+    </div>
+    <div class="card"><h3>給員工的畫休網址</h3>
+      <div class="row"><input type="text" readonly id="lvLink" style="flex:1;min-width:0" value="${esc(leaveLink())}"><button class="btn" id="lvCopy">複製</button></div>
+      <p class="muted small">傳到群組就可以，員工不用登入：選自己的名字 → 點日期畫休 → 送出。</p>
+      <h3 style="margin-top:16px">${+yy}年${+mm}月 回收狀況</h3>
+      <div class="kpis" style="margin-bottom:8px"><div class="kpi"><div class="label">已送出</div><div class="value good">${done.length}<span class="muted" style="font-size:14px"> / ${act.length}</span></div></div>
+        <div class="kpi"><div class="label">未送出</div><div class="value ${todo.length ? "bad" : "good"}">${todo.length}</div></div></div>
+      ${todo.length ? `<div class="small muted">未送出：${todo.map(e => esc(e.name)).join("、")}</div>` : ""}
+      <div class="row" style="margin-top:12px"><button class="btn primary big" id="lvImport" ${subs.length ? "" : "disabled"}>一鍵匯入排班表</button>
+        ${c?.importedAt && c.ym === ym ? `<span class="small muted">上次匯入 ${new Date(c.importedAt).toLocaleString("zh-TW", { hour12: false })}</span>` : ""}</div>
+      <p class="muted small">休假日會在排班表填上 X（已經排了店的格子不會蓋掉），「只能早／晚班」會顯示在排班表格子上給你參考。可以重複匯入。</p>
+    </div></div>
+    <div class="legend">${Object.entries(AVL).map(([k, v]) => `<span><i class="c-${k}"></i>${v.replace("畫休：", "")}</span>`).join("")}</div>
+    <div class="scroll"><table class="lvt">
+      <thead><tr><th class="sticky">姓名</th><th>送出時間</th>${days.map(d => `<th class="${d.we ? "we" : ""}">${d.d}<br>${d.wd}</th>`).join("")}</tr></thead>
+      <tbody>${S.leaves === undefined ? `<tr><td class="sticky" colspan="${days.length + 2}" style="padding:20px">載入中…</td></tr>` : table}</tbody>
+    </table></div>`;
+}
+async function leaveOpen(open) {
+  const ym = $("#lvYm").value || leaveYm();
+  const dl = $("#lvDl").value.replace(/-/g, ""), max = parseInt($("#lvMax").value, 10) || 0, note = $("#lvMsg").value.trim();
+  const roster = S.employees.filter(e => e.active !== false).map(e => ({ id: e.id, name: e.name, block: e.block, blockName: blockBy(e.block)?.name || "" }));
+  const prev = S.leaveCfg?.ym === ym ? S.leaveCfg : {};
+  try {
+    await S.store.setDocAt("config/leave", { ...prev, ym, deadline: dl, maxOff: max, note, roster, open, updatedAt: new Date().toISOString() });
+    toast(open ? "已開放畫休，把網址傳給員工吧" : "已關閉畫休");
+  } catch (e) { toast("儲存失敗：" + e.message); }
+}
+async function leaveImport() {
+  const ym = leaveYm(), subs = S.leaves || [];
+  if (!subs.length) return;
+  const offN = subs.reduce((n, x) => n + Object.values(x.days || {}).filter(v => v === "off").length, 0);
+  if (!confirm(`把 ${subs.length} 人的畫休匯入 ${ym} 排班表？\n休假日共 ${offN} 格會填上 X（已排店的格子不會被蓋掉）。`)) return;
+  try {
+    const cells = S.monthCells?.[ym] || await S.store.readMonth(ym);
+    const old = await new Promise(ok => { const u = S.store.watchDoc(`avail/${ym}`, d => { setTimeout(() => u && u(), 0); ok(d?.cells || {}); }); });
+    const avail = {}, write = {}, clash = [];
+    for (const x of subs) for (const [ds, code] of Object.entries(x.days || {})) {
+      if (!ds.startsWith(ym.replace("-", ""))) continue;
+      const k = ds + "_" + x.eid; avail[k] = code;
+      if (code === "off") {
+        const p = parse(cells[k]);
+        if (!cells[k]) write[k] = "X";
+        else if (p.stores.length) clash.push(`${x.name} ${dLabel(ds)}（已排 ${p.stores.join("、")}）`);
+      }
+    }
+    // 之前匯入是休、現在取消了 → 把系統填的 X 拿掉
+    for (const [k, code] of Object.entries(old)) if (code === "off" && avail[k] !== "off" && cells[k] === "X") write[k] = "";
+    await S.store.setDocAt(`avail/${ym}`, { cells: avail, importedAt: new Date().toISOString() });
+    if (Object.keys(write).length) await S.store.setCells(ym, write);
+    if (S.leaveCfg?.ym === ym) await S.store.setDocAt("config/leave", { importedAt: new Date().toISOString() }, true);
+    const n = Object.values(write).filter(Boolean).length;
+    const mm = openModal(`<h2>匯入完成</h2><div class="sub">${ym}：填入 ${n} 格休假，${Object.keys(avail).length} 筆畫休已顯示在排班表上。</div>
+      ${clash.length ? `<p style="color:var(--warn)"><b>${clash.length} 格有衝突</b>（員工要休，但那天已經排了店，沒有蓋掉）：</p><div class="small">${clash.map(esc).join("<br>")}</div>` : ""}
+      <div class="actions"><span class="spacer"></span><button class="btn" id="imClose">關閉</button><button class="btn primary" id="imGo">前往排班表</button></div>`);
+    mm.onclick = ev => { const t = ev.target.closest("button"); if (!t) return; closeModal(); if (t.id === "imGo") { S.ym = ym; setTab("grid"); } };
+  } catch (e) { toast("匯入失敗：" + e.message); }
 }
