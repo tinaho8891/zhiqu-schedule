@@ -242,3 +242,8 @@ body.lv main{max-width:560px}
 .sheetbtns{display:grid;gap:8px;margin-top:10px}
 .sbtn{border:1px solid var(--line);border-radius:10px;padding:14px;font-size:16px;font-weight:500;background:#fff}
 .sbtn.on{outline:3px solid var(--blue)}
+
+.scrollx{overflow-x:auto}
+table.list.emp{font-size:12px;min-width:760px}
+table.list.emp td,table.list.emp th{padding:3px 6px;white-space:nowrap}
+table.list.emp input[type=text],table.list.emp select{padding:3px 6px}
