@@ -66,6 +66,10 @@ async function firebaseStore() {
         await fs.setDoc(d("months", ym), { cells });
       }
     },
+    // 通用文件存取（畫休功能用）
+    watchDoc(path, cb) { return fs.onSnapshot(fs.doc(db, path), s => cb(s.exists() ? s.data() : null), e => onError(e)); },
+    setDocAt(path, data, merge) { return fs.setDoc(fs.doc(db, path), data, merge ? { merge: true } : {}); },
+    watchLeaves(ym, cb) { return fs.onSnapshot(fs.query(fs.collection(db, "leave"), fs.where("ym", "==", ym)), q => cb(q.docs.map(x => ({ id: x.id, ...x.data() }))), e => onError(e)); },
     async readMonth(ym) {
       const s = await fs.getDoc(d("months", ym));
       return s.exists() ? s.data().cells || {} : {};
@@ -111,6 +115,9 @@ function localStore() {
       data.months = JSON.parse(JSON.stringify(x.months || {}));
       save();
     },
+    watchDoc(path, cb) { return sub(() => cb((data.docs || {})[path] || null)); },
+    async setDocAt(path, v, merge) { data.docs = data.docs || {}; data.docs[path] = merge ? { ...(data.docs[path] || {}), ...v } : v; save(); },
+    watchLeaves(ym, cb) { return sub(() => cb(Object.entries(data.docs || {}).filter(([k, v]) => k.startsWith("leave/") && v.ym === ym).map(([k, v]) => ({ id: k.slice(6), ...v })))); },
     async readMonth(ym) { return { ...(data.months[ym] || {}) }; },
   };
 }
