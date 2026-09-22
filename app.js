@@ -142,7 +142,8 @@ function startData() {
 function stopData() {
   S.unsubs.forEach(f => f && f()); S.unsubs = [];
   Object.values(S.monthSubs || {}).forEach(f => f && f()); S.monthSubs = {}; S.monthCells = {};
-  Object.values(S.availSubs || {}).forEach(f => f && f()); S.availSubs = {}; S.availDocs = {}; S.avail = {};
+  Object.values(S.availSubs || {}).forEach(f => f && f()); S.availSubs = {}; S.availDocs = {};
+  Object.values(S.lvSubs || {}).forEach(f => f && f()); S.lvSubs = {}; S.lvCells = {}; S.avail = {};
   if (S.leaveCfgSub) S.leaveCfgSub(); if (S.leavesSub) S.leavesSub(); S.leaveCfgSub = S.leavesSub = null; S.leavesYm = null;
   S.dataOn = false; S.master = undefined; S.employees = undefined; S.cells = {}; S.monthLoaded = false;
 }
@@ -155,9 +156,28 @@ function neededMonths() {
 function watchMonth() {
   S.monthSubs = S.monthSubs || {}; S.monthCells = S.monthCells || {};
   const need = neededMonths();
-  for (const ym of Object.keys(S.monthSubs)) if (!need.has(ym)) { S.monthSubs[ym](); delete S.monthSubs[ym]; delete S.monthCells[ym]; if (S.availSubs?.[ym]) { S.availSubs[ym](); delete S.availSubs[ym]; delete S.availDocs[ym]; } }
-  S.availSubs = S.availSubs || {}; S.availDocs = S.availDocs || {};
-  for (const ym of need) if (!S.availSubs[ym] && S.store.watchDoc) S.availSubs[ym] = S.store.watchDoc(`avail/${ym}`, d => { S.availDocs[ym] = d?.cells || {}; S.avail = Object.assign({}, ...Object.values(S.availDocs)); render(); });
+  for (const ym of Object.keys(S.monthSubs)) if (!need.has(ym)) {
+    S.monthSubs[ym](); delete S.monthSubs[ym]; delete S.monthCells[ym];
+    if (S.availSubs?.[ym]) { S.availSubs[ym](); delete S.availSubs[ym]; delete S.availDocs[ym]; }
+    if (S.lvSubs?.[ym]) { S.lvSubs[ym](); delete S.lvSubs[ym]; delete S.lvCells[ym]; }
+  }
+  S.availSubs = S.availSubs || {}; S.availDocs = S.availDocs || {}; S.lvSubs = S.lvSubs || {}; S.lvCells = S.lvCells || {};
+  // 畫休：直接讀員工送出的資料（不用等匯入），已匯入的當備底
+  const mergeAv = () => { S.avail = Object.assign({}, ...Object.values(S.availDocs), ...Object.values(S.lvCells)); };
+  for (const ym of need) if (!S.availSubs[ym] && S.store.watchDoc) {
+    S.availSubs[ym] = () => {};
+    const ua = S.store.watchDoc(`avail/${ym}`, d => { S.availDocs[ym] = d?.cells || {}; mergeAv(); render(); });
+    if (S.availSubs[ym]) S.availSubs[ym] = ua; else ua();
+  }
+  for (const ym of need) if (!S.lvSubs[ym] && isAdmin() && S.store.watchLeaves) {
+    S.lvSubs[ym] = () => {};
+    const ul = S.store.watchLeaves(ym, list => {
+      const m = {};
+      for (const x of list) for (const [ds, code] of Object.entries(x.days || {})) m[ds + "_" + x.eid] = code;
+      S.lvCells[ym] = m; mergeAv(); render();
+    });
+    if (S.lvSubs[ym]) S.lvSubs[ym] = ul; else ul();
+  }
   const merge = () => {
     S.cells = Object.assign({}, ...Object.values(S.monthCells));
     S.monthLoaded = [...need].every(ym => S.monthCells[ym]);
@@ -831,7 +851,7 @@ function leaveHtml() {
       ${todo.length ? `<div class="small muted">未送出：${todo.map(e => esc(e.name)).join("、")}</div>` : ""}
       <div class="row" style="margin-top:12px"><button class="btn primary big" id="lvImport" ${subs.length ? "" : "disabled"}>一鍵匯入排班表</button>
         ${c?.importedAt && c.ym === ym ? `<span class="small muted">上次匯入 ${new Date(c.importedAt).toLocaleString("zh-TW", { hour12: false })}</span>` : ""}</div>
-      <p class="muted small">休假日會在排班表填上 X（已經排了店的格子不會蓋掉），「只能早／晚班」會顯示在排班表格子上給你參考。可以重複匯入。</p>
+      <p class="muted small">員工一送出，排班表格子右上角就會出現畫休標記（休／早／晚／皆），不用等匯入。按這個鍵是把<b>休假日直接填成 X</b>（已經排了店的格子不會蓋掉），可以重複按。</p>
     </div></div>
     <div class="legend">${Object.entries(AVL).map(([k, v]) => `<span><i class="c-${k}"></i>${v.replace("畫休：", "")}</span>`).join("")}</div>
     <div class="scroll"><table class="lvt">
