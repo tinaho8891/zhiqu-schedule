@@ -1,0 +1,26 @@
+rules_version = '2';
+// 智取店排班系統 — Firestore 安全規則
+// 貼到 Firebase 主控台 → Firestore Database → 規則，按「發布」。
+// 下面的 Email 要和 firebase-config.js 的 OWNER_EMAIL 一樣。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email_verified == true; }
+    function email()    { return request.auth.token.email.lower(); }
+    function isOwner()  { return signedIn() && email() == 'tinaho8891@gmail.com'; }
+    function accPath()  { return /databases/$(database)/documents/config/access; }
+    function pubPath()  { return /databases/$(database)/documents/config/public; }
+    function isAdmin()  { return isOwner() || (signedIn() && exists(accPath()) && email() in get(accPath()).data.admins); }
+    function isViewer() { return signedIn() && exists(accPath()) && email() in get(accPath()).data.viewers; }
+    function isPublic() { return exists(pubPath()) && get(pubPath()).data.publicRead == true; }
+    function canRead()  { return isAdmin() || isViewer() || isPublic(); }
+
+    // 「不用登入也能看」開關：任何人可讀
+    match /config/public { allow read: if true; allow write: if isAdmin(); }
+    // 主管／檢視者名單：登入者可讀（用來判斷自己的身分）
+    match /config/access { allow read: if signedIn(); allow write: if isAdmin(); }
+    // 門市、人員設定
+    match /config/{doc}  { allow read: if canRead(); allow write: if isAdmin(); }
+    // 每月班表
+    match /months/{ym}   { allow read: if canRead(); allow write: if isAdmin(); }
+  }
+}
