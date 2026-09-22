@@ -1,4 +1,4 @@
-import { createStore } from "./store.js";
+import { createStore } from "./store.js?v=3";
 
 /* ================= 狀態 ================= */
 const SHIFT = { am: "早班", pm: "晚班" };
