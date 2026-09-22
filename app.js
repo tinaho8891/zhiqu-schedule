@@ -6,7 +6,7 @@ const WD = ["日", "一", "二", "三", "四", "五", "六"];
 const S = {
   store: null, user: undefined, access: { admins: [], viewers: [] }, publicRead: false,
   master: undefined, employees: undefined, cells: {}, monthLoaded: false,
-  ym: "", tab: "overview", block: null, day: "", ovShift: "both", onlyMissing: false, search: "",
+  ym: "", tab: "overview", block: null, day: "", ovShift: "am", onlyMissing: false, search: "",
   unsubs: [], monthUnsub: null, dataOn: false,
 };
 const $ = s => document.querySelector(s);
@@ -140,15 +140,31 @@ function startData() {
 }
 function stopData() {
   S.unsubs.forEach(f => f && f()); S.unsubs = [];
-  if (S.monthUnsub) S.monthUnsub(); S.monthUnsub = null;
+  Object.values(S.monthSubs || {}).forEach(f => f && f()); S.monthSubs = {}; S.monthCells = {};
   S.dataOn = false; S.master = undefined; S.employees = undefined; S.cells = {}; S.monthLoaded = false;
 }
-function watchMonth() {
-  if (S.monthUnsub) S.monthUnsub();
-  S.monthLoaded = false; S.cells = {};
-  const ym = S.ym;
-  S.monthUnsub = S.store.watchMonth(ym, c => { if (ym !== S.ym) return; S.cells = c; S.monthLoaded = true; render(); });
+// 依目前畫面需要的月份訂閱資料（總覽的 14 天可能跨月）
+function neededMonths() {
+  const need = new Set([S.ym]);
+  if (S.tab === "overview") { need.add(ymOf(ovStart())); need.add(ymOf(addDays(ovStart(), 13))); }
+  return need;
 }
+function watchMonth() {
+  S.monthSubs = S.monthSubs || {}; S.monthCells = S.monthCells || {};
+  const need = neededMonths();
+  for (const ym of Object.keys(S.monthSubs)) if (!need.has(ym)) { S.monthSubs[ym](); delete S.monthSubs[ym]; delete S.monthCells[ym]; }
+  const merge = () => {
+    S.cells = Object.assign({}, ...Object.values(S.monthCells));
+    S.monthLoaded = [...need].every(ym => S.monthCells[ym]);
+  };
+  for (const ym of need) if (!S.monthSubs[ym]) {
+    S.monthSubs[ym] = S.store.watchMonth(ym, c => { if (!S.monthSubs[ym]) return; S.monthCells[ym] = c; merge(); render(); });
+  }
+  merge();
+}
+function mondayOf(ds) { const d = fromDs(ds); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return toDs(d); }
+function ovStart() { return S.ovStart || (S.ovStart = mondayOf(todayDs())); }
+function setOvStart(ds) { S.ovStart = ds; if (S.dataOn) watchMonth(); render(); }
 function setMonth(ym) {
   S.ym = ym;
   if (ymOf(S.day) !== ym) S.day = ym.replace("-", "") + "01";
@@ -160,6 +176,7 @@ function setMonth(ym) {
 function setTab(t) {
   S.tab = t; S.scrolled = false;
   try { localStorage.setItem("zq-tab", t); } catch {}
+  if (S.dataOn) watchMonth();
   render();
 }
 
@@ -168,6 +185,7 @@ function render() {
   const [y, m] = S.ym.split("-");
   $("#monthLabel").textContent = `${y}年${+m}月`;
   renderUser();
+  $(".month-nav").style.visibility = S.tab === "overview" ? "hidden" : "";
   document.querySelectorAll("#tabs [data-admin]").forEach(b => b.hidden = !isAdmin());
   if (S.tab === "settings" && !isAdmin()) S.tab = "overview";
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === S.tab));
@@ -233,72 +251,41 @@ function bindSetup() {
 
 /* ---------- 漏排總覽 ---------- */
 function overviewHtml() {
-  const days = monthDays(S.ym), A = analyze(), names = storeNames(), t = todayDs();
-  let mAm = 0, mPm = 0, full = 0, started = 0, blank = 0;
-  const perDay = {};
-  for (const d of days) {
-    const am = missingOf(A, d.ds, "am"), pm = missingOf(A, d.ds, "pm");
-    perDay[d.ds] = { am, pm };
-    if (am) mAm += am.length; if (pm) mPm += pm.length;
-    if (am || pm) started++; else blank++;
-    if (am && pm && !am.length && !pm.length) full++;
-  }
-  const td = perDay[t];
-  const tdMiss = td ? (td.am?.length || 0) + (td.pm?.length || 0) : null;
-  const rowsMiss = new Set();
-  for (const d of days) for (const sh of ["am", "pm"]) (perDay[d.ds][sh] || []).forEach(s => rowsMiss.add(s));
-  const showSh = S.ovShift === "both" ? ["am", "pm"] : [S.ovShift];
-
-  let body = "";
-  for (const h of hubs()) {
-    const list = names.filter(n => storeHub(n) === h.id && (!S.onlyMissing || rowsMiss.has(n)));
-    if (!list.length) continue;
-    body += `<tr class="hub"><td class="sticky">${esc(h.name)}</td><td colspan="${days.length}"></td></tr>`;
-    for (const n of list) {
-      body += `<tr><td class="sticky">${esc(n)}</td>`;
-      for (const d of days) {
-        const tip = [dLabel(d.ds) + " " + n];
-        const spans = showSh.map(sh => {
-          const x = A[d.ds]?.[sh];
-          let cls = "s-idle", who = "尚未排班";
-          if (x?.started) {
-            const c = x.cov[n];
-            if (!c) { cls = "s-miss"; who = "漏排！"; }
-            else { cls = c.length > 1 ? "s-dup" : "s-ok"; who = c.map(e => e.name).join("、"); }
-          }
-          tip.push(`${SHIFT[sh]}：${who}`);
-          return `<span class="${cls}" data-sh="${sh}"></span>`;
-        }).join("");
-        body += `<td><div class="cell2" data-ds="${d.ds}" data-store="${esc(n)}" title="${esc(tip.join("\n"))}">${spans}</div></td>`;
-      }
-      body += `</tr>`;
-    }
-  }
-  const foot = showSh.map(sh => `<tr><td class="sticky">${SHIFT[sh]}漏排</td>${days.map(d => {
-    const m = perDay[d.ds][sh];
-    return `<td class="${m == null ? "" : m.length ? "bad" : "good"}">${m == null ? "" : m.length || "✓"}</td>`;
+  const A = analyze(), names = storeNames(), t = todayDs(), sh = S.ovShift === "pm" ? "pm" : "am";
+  const start = ovStart(), days = [];
+  for (let i = 0; i < 14; i++) { const ds = addDays(start, i), d = fromDs(ds); days.push({ ds, lbl: `${d.getMonth() + 1}/${d.getDate()}`, wd: WD[d.getDay()], we: d.getDay() === 0 || d.getDay() === 6, today: ds === t }); }
+  const missOf = ds => names.filter(n => !A[ds]?.[sh]?.cov[n]);
+  const perDay = Object.fromEntries(days.map(d => [d.ds, missOf(d.ds)]));
+  const total = days.reduce((s, d) => s + perDay[d.ds].length, 0);
+  const tdMiss = perDay[t] ? perDay[t].length : null;
+  const rowsMiss = new Set(days.flatMap(d => perDay[d.ds]));
+  const hubIdx = Object.fromEntries(hubs().map((h, i) => [h.id, i]));
+  const list = names.filter(n => !S.onlyMissing || rowsMiss.has(n));
+  const rows = list.map(n => `<tr><td class="sticky"><span class="sname h${hubIdx[storeHub(n)] % 6}">${esc(n)}</span></td>${days.map(d => {
+    const c = A[d.ds]?.[sh]?.cov[n];
+    const tip = `${dLabel(d.ds)} ${n} ${SHIFT[sh]}：${c ? c.map(e => e.name).join("、") : "尚未有人負責"}`;
+    return `<td class="ck ${c ? "ok" : "no"} ${d.today ? "tcol" : ""}" data-ds="${d.ds}" data-store="${esc(n)}" title="${esc(tip)}">${c ? "✓" : "✕"}</td>`;
   }).join("")}</tr>`).join("");
-
+  const range = `${days[0].lbl} — ${days[13].lbl}`;
   return `
-  <div class="kpis">
-    <div class="kpi"><div class="label">今天漏排（早＋晚）</div><div class="value ${tdMiss ? "bad" : tdMiss === 0 ? "good" : ""}">${tdMiss ?? "—"}</div><div class="sub">${td ? `早 ${td.am?.length ?? "未排"}・晚 ${td.pm?.length ?? "未排"}` : "今天不在這個月"}</div></div>
-    <div class="kpi"><div class="label">本月早班漏排</div><div class="value ${mAm ? "bad" : "good"}">${mAm}</div><div class="sub">店・天</div></div>
-    <div class="kpi"><div class="label">本月晚班漏排</div><div class="value ${mPm ? "bad" : "good"}">${mPm}</div><div class="sub">店・天</div></div>
-    <div class="kpi"><div class="label">全部排滿的天數</div><div class="value">${full}<span class="muted" style="font-size:14px"> / ${days.length}</span></div><div class="sub">尚未開始排：${blank} 天</div></div>
+  <div class="ovbar">
+    ${["am", "pm"].map(k => `<button class="ovtab ${sh === k ? "on" : ""}" data-ovsh="${k}">總覽・${SHIFT[k]}</button>`).join("")}
   </div>
-  <div class="row toolbar" style="margin-bottom:6px">
-    <div class="seg" id="ovShift">${[["both", "早＋晚"], ["am", "只看早班"], ["pm", "只看晚班"]].map(([k, l]) => `<button data-v="${k}" class="${S.ovShift === k ? "on" : ""}">${l}</button>`).join("")}</div>
+  <div class="row toolbar" style="margin:12px 0">
+    <button class="btn" id="ovPrev">◀ 往前14天</button>
+    <button class="btn" id="ovToday">回到今天</button>
+    <button class="btn" id="ovNext">往後14天 ▶</button>
+    <span class="muted">${range}</span>
+    <span class="spacer"></span>
+    <span class="ovsum">今天${SHIFT[sh]}漏排 <b class="${tdMiss ? "bad" : "good"}">${tdMiss ?? "—"}</b> 家・這 14 天共 <b class="${total ? "bad" : "good"}">${total}</b> 店次</span>
     <label class="small"><input type="checkbox" id="onlyMiss" ${S.onlyMissing ? "checked" : ""}> 只顯示有漏排的門市</label>
   </div>
-  <div class="legend">
-    <span><i class="s-ok"></i>已排</span><span><i class="s-miss"></i>漏排</span><span><i class="s-dup"></i>2 人以上同時負責</span><span><i class="s-idle"></i>這天這班尚未開始排</span>
-    <span>${S.ovShift === "both" ? "每格上半＝早班、下半＝晚班。" : ""}點格子可查看或直接指派</span>
-  </div>
-  <div class="scroll"><table class="mx">
-    <thead><tr><th class="sticky">門市</th>${days.map(d => `<th class="${d.today ? "today" : ""} ${d.we ? "we" : ""}">${d.d}<br>${d.wd}</th>`).join("")}</tr></thead>
-    <tbody>${body || `<tr><td class="sticky" colspan="${days.length + 1}" style="padding:20px">本月沒有漏排 🎉</td></tr>`}</tbody>
-    <tfoot>${foot}</tfoot>
-  </table></div>`;
+  <div class="scroll"><table class="ov">
+    <thead><tr><th class="sticky corner"></th>${days.map(d => `<th class="${d.today ? "today" : ""}">${d.lbl}<br>${d.wd}</th>`).join("")}</tr></thead>
+    <tbody>${rows || `<tr><td class="sticky" colspan="15" style="padding:20px">這 14 天沒有漏排 🎉</td></tr>`}</tbody>
+    <tfoot><tr><td class="sticky">漏排家數</td>${days.map(d => { const m = perDay[d.ds].length; return `<td class="${m ? "bad" : "good"}">${m || "✓"}</td>`; }).join("")}</tr></tfoot>
+  </table></div>
+  <div class="legend" style="margin-top:8px">${hubs().map((h, i) => `<span><i class="dot h${i % 6}"></i>${esc(h.name)}</span>`).join("")}<span>點 ✕ 可以直接指派人</span></div>`;
 }
 
 /* ---------- 排班表 ---------- */
@@ -448,8 +435,11 @@ function onMainClick(e) {
   const t = e.target;
   const q = sel => t.closest(sel);
   let el;
-  if ((el = q("#ovShift button"))) { S.ovShift = el.dataset.v; render(); return; }
-  if ((el = q(".cell2"))) { const sp = q("[data-sh]"); openAssign(el.dataset.store, el.dataset.ds, sp ? sp.dataset.sh : (S.ovShift === "both" ? "am" : S.ovShift)); return; }
+  if ((el = q("[data-ovsh]"))) { S.ovShift = el.dataset.ovsh; render(); return; }
+  if ((el = q("td.ck"))) { openAssign(el.dataset.store, el.dataset.ds, S.ovShift === "pm" ? "pm" : "am"); return; }
+  if ((el = q("#ovPrev"))) { setOvStart(addDays(ovStart(), -14)); return; }
+  if ((el = q("#ovNext"))) { setOvStart(addDays(ovStart(), 14)); return; }
+  if ((el = q("#ovToday"))) { setOvStart(mondayOf(todayDs())); return; }
   if ((el = q("[data-block]"))) { S.block = el.dataset.block; render(); return; }
   if ((el = q("td.c"))) { if (isAdmin()) openCellEditor(el.dataset.e, el.dataset.ds); return; }
   if ((el = q("[data-miss]"))) { openMissList(el.dataset.miss, blockBy(S.block).shift); return; }
@@ -510,7 +500,6 @@ async function writeCells(ym, map) {
 function openCellEditor(eid, ds) {
   const e = empBy(eid); if (!e) return;
   const b = blockBy(e.block);
-  if (ymOf(ds) !== S.ym) return toast("請先切換到該月份");
   const key = ds + "_" + eid;
   const orig = S.cells[key] || "";
   const p = parse(orig);
@@ -542,7 +531,7 @@ function openCellEditor(eid, ds) {
   const save = async () => {
     st.note = m.querySelector("#cNote").value;
     const v = compose(st.stores, st.off, st.note);
-    if (v !== orig) { if (!(await writeCells(S.ym, { [key]: v }))) return false; toast("已儲存"); }
+    if (v !== orig) { if (!(await writeCells(ymOf(ds), { [key]: v }))) return false; toast("已儲存"); }
     return true;
   };
   m.onclick = async ev => {
@@ -561,7 +550,7 @@ function openCellEditor(eid, ds) {
     if (t.id === "cPrev" || t.id === "cNext") {
       const nd = addDays(ds, t.id === "cPrev" ? -1 : 1);
       if (!(await save())) return;
-      if (ymOf(nd) !== S.ym) { closeModal(); return toast("已到月份邊界"); }
+      if (!S.monthCells[ymOf(nd)]) { closeModal(); return toast("已到月份邊界"); }
       openCellEditor(eid, nd);
     }
   };
@@ -570,7 +559,6 @@ function openCellEditor(eid, ds) {
 
 // 指派某門市某天某班
 function openAssign(store, ds, sh) {
-  if (ymOf(ds) !== S.ym) return;
   const m = openModal("");
   const draw = () => {
     const A = analyze();
@@ -604,7 +592,7 @@ function openAssign(store, ds, sh) {
       p.off = false;
     } else stores = stores.filter(s => s !== store);
     const v = compose(stores, p.off, [...p.unknown, ...p.notes].join(" "));
-    if (await writeCells(S.ym, { [key]: v })) { toast(t.dataset.add ? `已指派給 ${empBy(id).name}` : "已移除"); closeModal(); }
+    if (await writeCells(ymOf(ds), { [key]: v })) { toast(t.dataset.add ? `已指派給 ${empBy(id).name}` : "已移除"); closeModal(); }
   };
 }
 
