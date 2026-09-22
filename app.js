@@ -402,16 +402,6 @@ function settingsHtml() {
       <td><input type="text" value="${esc(s.name)}" data-srename="${esc(s.name)}" style="width:110px"></td>
       <td><select data-shub="${esc(s.name)}">${hubOpts(s.hub)}</select></td>
       <td><button class="btn small danger" data-sdel="${esc(s.name)}">刪除</button></td></tr>`).join("")).join("");
-  const empSections = blocks().map(b => {
-    const list = S.employees.filter(e => e.block === b.key);
-    return `<details ${b.key === S.block ? "open" : ""}><summary style="cursor:pointer;padding:6px 0;font-weight:500">${esc(b.name)}（${list.length}）</summary>
-      <table class="list"><tr><th>姓名</th><th>區塊</th><th>啟用</th><th></th></tr>
-      ${list.map(e => `<tr><td><input type="text" value="${esc(e.name)}" data-ename="${e.id}" style="width:100px"></td>
-        <td><select data-eblock="${e.id}">${blockOpts(e.block)}</select></td>
-        <td><input type="checkbox" data-eact="${e.id}" ${e.active !== false ? "checked" : ""}></td>
-        <td style="white-space:nowrap"><button class="btn small" data-eup="${e.id}">↑</button> <button class="btn small" data-edown="${e.id}">↓</button> <button class="btn small danger" data-edel="${e.id}">刪</button></td></tr>`).join("")}
-      </table></details>`;
-  }).join("");
   const aliasText = Object.entries(S.master.aliases || {}).map(([a, b]) => `${a}=${b}`).join("\n");
   const local = S.store.mode === "local";
   return `<div class="grid2">
@@ -427,11 +417,7 @@ function settingsHtml() {
     </div>
   </div>
   <div>
-    <div class="card"><h3>人員</h3>
-      <div class="row" style="margin-bottom:8px"><input type="text" id="newEmp" placeholder="姓名" style="width:100px"><select id="newEmpBlock">${blockOpts(S.block)}</select><button class="btn primary" id="addEmp">新增人員</button></div>
-      <p class="muted small">離職或暫停的人把「啟用」取消即可，歷史班表會保留。</p>
-      ${empSections}
-    </div>
+    ${empCardHtml()}
     <div class="card"><h3>權限</h3>
       ${local ? `<p class="muted small">本機試用模式沒有權限控管。設定好 Firebase 後才會生效。</p>` : ""}
       <p class="small">最高管理者：<b>${esc(S.store.owner)}</b></p>
@@ -488,6 +474,8 @@ function onMainClick(e) {
   if ((el = q("[data-sdel]"))) return delStore(el.dataset.sdel);
   if ((el = q("#saveAliases"))) return saveAliases();
   if ((el = q("#addEmp"))) return addEmp();
+  if ((el = q("#empPaste"))) return openEmpPaste();
+  if ((el = q("#empExport"))) return exportEmployees();
   if ((el = q("[data-eup]"))) return moveEmp(el.dataset.eup, -1);
   if ((el = q("[data-edown]"))) return moveEmp(el.dataset.edown, 1);
   if ((el = q("[data-edel]"))) return delEmp(el.dataset.edel);
@@ -504,7 +492,11 @@ function onMainChange(e) {
   if (t.dataset.srename !== undefined) return renameStore(t.dataset.srename, t.value.trim());
   if (t.dataset.shub !== undefined) return patchStore(t.dataset.shub, { hub: t.value });
   if (t.dataset.ename) return patchEmp(t.dataset.ename, { name: t.value.trim() });
-  if (t.dataset.eblock) return patchEmp(t.dataset.eblock, { block: t.value });
+  if (t.dataset.ecode) { const c = t.value.trim().toUpperCase(); const e = empBy(t.dataset.ecode); return patchEmp(t.dataset.ecode, { code: c, fullCode: e?.fullCode && e.fullCode !== fullFromCode(e.code) ? e.fullCode : fullFromCode(c) }); }
+  if (t.dataset.efull) return patchEmp(t.dataset.efull, { fullCode: t.value.trim() });
+  if (t.dataset.ewage) return patchEmp(t.dataset.ewage, { wage: t.value });
+  if (t.dataset.eunit) return patchEmp(t.dataset.eunit, { unit: t.value.trim() });
+  if (t.dataset.eblock) { const e = empBy(t.dataset.eblock); const auto = !e.unit || e.unit === unitOfBlock(e.block); return patchEmp(t.dataset.eblock, auto ? { block: t.value, unit: unitOfBlock(t.value) } : { block: t.value }); }
   if (t.dataset.eact) return patchEmp(t.dataset.eact, { active: t.checked });
 }
 function goDay(ds) {
@@ -715,8 +707,10 @@ function saveAliases() {
 }
 function addEmp() {
   const name = $("#newEmp").value.trim(), block = $("#newEmpBlock").value;
+  const code = ($("#newEmpCode").value || "").trim().toUpperCase(), wage = $("#newEmpWage").value;
   if (!name) return toast("請輸入姓名");
-  saveEmps([...S.employees, { id: "e" + Date.now().toString(36), name, block, active: true }]); toast("已新增 " + name);
+  saveEmps([...S.employees, { id: "e" + Date.now().toString(36), name, block, code, fullCode: fullFromCode(code), wage, unit: unitOfBlock(block), active: true }]);
+  toast("已新增 " + name);
 }
 function patchEmp(id, patch) {
   if (patch.name === "") return render();
@@ -768,12 +762,15 @@ async function importBackup(e) {
 }
 
 /* ================= 匯出 Excel ================= */
-async function exportExcel() {
+async function loadXLSX() {
   if (!window.XLSX) {
     toast("載入 Excel 元件中…");
     await new Promise((ok, bad) => { const s = document.createElement("script"); s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"; s.onload = ok; s.onerror = bad; document.head.appendChild(s); });
   }
-  const X = window.XLSX, wb = X.utils.book_new(), days = monthDays(S.ym), A = analyze();
+  return window.XLSX;
+}
+async function exportExcel() {
+  const X = await loadXLSX(), wb = X.utils.book_new(), days = monthDays(S.ym), A = analyze();
   const head = ["", ...days.map(d => `${d.d}(${d.wd})`)];
   const miss = [head];
   for (const sh of ["am", "pm"]) miss.push([`${SHIFT[sh]}漏排`, ...days.map(d => { const m = missingOf(A, d.ds, sh); return m == null ? "未排" : m.join(" ") || "✓"; })]);
@@ -898,4 +895,140 @@ async function leaveImport() {
       <div class="actions"><span class="spacer"></span><button class="btn" id="imClose">關閉</button><button class="btn primary" id="imGo">前往排班表</button></div>`);
     mm.onclick = ev => { const t = ev.target.closest("button"); if (!t) return; closeModal(); if (t.id === "imGo") { S.ym = ym; setTab("grid"); } };
   } catch (e) { toast("匯入失敗：" + e.message); }
+}
+
+/* ================= 人員／工號 ================= */
+const WAGES = ["早班時薪", "晚班時薪", "假日時薪", "跑點時薪", "月薪"];
+const CORP = "8877";
+// 區塊 → Apollo 單位名稱（例如 新莊榮華 - 智取店早）
+function unitOfBlock(key) {
+  const b = blockBy(key); if (!b) return "";
+  const hub = hubName(b.hub).replace(/組$/, "");
+  return `新莊${hub} - 智取店${b.shift === "am" ? "早" : "晚"}`;
+}
+const empUnit = e => e.unit || unitOfBlock(e.block);
+// 由工號自動組完整工號：8877 + 工號的數字（少數特例可以自己手改）
+function fullFromCode(code) {
+  const d = String(code || "").replace(/\D/g, "");
+  return d ? CORP + d : "";
+}
+// 由單位文字判斷區塊（新莊榮華 - 智取店早 → rh_am）
+function blockFromUnit(unit) {
+  const t = String(unit || "");
+  const shift = /晚/.test(t) ? "pm" : /早/.test(t) ? "am" : "";
+  const hub = hubs().find(h => t.includes(h.name.replace(/組$/, "")));
+  if (!hub || !shift) return "";
+  return blocks().find(b => b.hub === hub.id && b.shift === shift)?.key || "";
+}
+function empRowsHtml(b) {
+  const blockOpts = sel => blocks().map(x => `<option value="${x.key}" ${x.key === sel ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+  const wageOpts = sel => `<option value=""></option>` + WAGES.map(w => `<option ${w === sel ? "selected" : ""}>${esc(w)}</option>`).join("");
+  return S.employees.filter(e => e.block === b.key).map(e => `<tr>
+    <td><input type="text" value="${esc(e.name)}" data-ename="${e.id}" style="width:88px"></td>
+    <td><input type="text" value="${esc(e.code || "")}" data-ecode="${e.id}" placeholder="SPX00000" style="width:92px"></td>
+    <td><input type="text" value="${esc(e.fullCode || "")}" data-efull="${e.id}" placeholder="${CORP}…" style="width:104px"></td>
+    <td><select data-ewage="${e.id}">${wageOpts(e.wage)}</select></td>
+    <td><select data-eblock="${e.id}">${blockOpts(e.block)}</select></td>
+    <td><input type="text" value="${esc(empUnit(e))}" data-eunit="${e.id}" style="width:150px"></td>
+    <td><input type="checkbox" data-eact="${e.id}" ${e.active !== false ? "checked" : ""}></td>
+    <td style="white-space:nowrap"><button class="btn small" data-eup="${e.id}">↑</button> <button class="btn small" data-edown="${e.id}">↓</button> <button class="btn small danger" data-edel="${e.id}">刪</button></td></tr>`).join("");
+}
+function empCardHtml() {
+  const blockOpts = sel => blocks().map(x => `<option value="${x.key}" ${x.key === sel ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+  const wageOpts = () => `<option value="">時薪類別</option>` + WAGES.map(w => `<option>${esc(w)}</option>`).join("");
+  const act = S.employees.filter(e => e.active !== false).length, noCode = S.employees.filter(e => e.active !== false && !e.code).length;
+  const sections = blocks().map(b => `<details ${b.key === S.block ? "open" : ""}><summary style="cursor:pointer;padding:6px 0;font-weight:500">${esc(b.name)}（${S.employees.filter(e => e.block === b.key).length}）</summary>
+      <div class="scrollx"><table class="list emp"><tr><th>姓名</th><th>工號</th><th>完整工號</th><th>時薪類別</th><th>區塊</th><th>單位</th><th>啟用</th><th></th></tr>
+      ${empRowsHtml(b)}</table></div></details>`).join("");
+  return `<div class="card"><h3>人員（啟用 ${act} 人${noCode ? `，其中 ${noCode} 人還沒填工號` : ""}）</h3>
+    <div class="row" style="margin-bottom:8px">
+      <input type="text" id="newEmp" placeholder="姓名" style="width:90px">
+      <input type="text" id="newEmpCode" placeholder="工號 SPX00000" style="width:120px">
+      <select id="newEmpWage">${wageOpts()}</select>
+      <select id="newEmpBlock">${blockOpts(S.block)}</select>
+      <button class="btn primary" id="addEmp">新增人員</button>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn" id="empPaste">批次貼上名單…</button>
+      <button class="btn" id="empExport">匯出人員名單 Excel</button>
+      <span class="muted small">工號填 SPX 開頭，完整工號會自動帶成 ${CORP}+數字（可自己改）。</span>
+    </div>
+    <p class="muted small">離職的人把「啟用」取消就好，歷史班表會保留；按「刪」才會整筆刪掉。</p>
+    ${sections}</div>`;
+}
+// 從 Excel／表格複製貼上，一次更新工號與新增人員
+function openEmpPaste() {
+  const blockOpts = blocks().map(x => `<option value="${x.key}">${esc(x.name)}</option>`).join("");
+  const m = openModal(`<h2>批次貼上名單</h2>
+    <div class="sub">從 Excel 或 Apollo 名單把資料整段複製，貼到下面（一行一個人，欄位順序不拘）。<br>
+      會自動認出：<b>SPX 工號</b>、<b>完整工號</b>、<b>姓名</b>、<b>時薪類別</b>、<b>單位</b>。</div>
+    <textarea id="epText" style="min-height:160px" placeholder="SPX36650	8877	887736650	程珮菁	早班時薪	新莊榮華 - 智取店早"></textarea>
+    <div class="row" style="margin-top:8px"><label class="small">認不出單位時，歸到<select id="epBlock">${blockOpts}</select></label>
+      <label class="small"><input type="checkbox" id="epAdd" checked> 名單上有、系統沒有的人自動新增</label></div>
+    <div id="epPreview" class="small muted" style="margin-top:8px"></div>
+    <div class="actions"><button class="btn" id="epCheck">試算看看</button><span class="spacer"></span>
+      <button class="btn" id="epCancel">取消</button><button class="btn primary" id="epGo">套用</button></div>`);
+  const parse = () => {
+    const rows = [];
+    for (const line of m.querySelector("#epText").value.split("\n")) {
+      const cells = line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean);
+      if (!cells.length) continue;
+      const r = { code: "", full: "", name: "", wage: "", unit: "" };
+      for (const c of cells) {
+        if (/^SPX/i.test(c) && !r.code) r.code = c.toUpperCase();
+        else if (/^\d{8,}$/.test(c)) r.full = c;
+        else if (/時薪|月薪/.test(c)) r.wage = c;
+        else if (/智取店|店早|店晚/.test(c)) r.unit = c;
+        else if (/^\d+$/.test(c)) { /* 公司代碼 8877 之類，略過 */ }
+        else if (!r.name && !/^\d/.test(c)) r.name = c;
+      }
+      if (r.name || r.code) rows.push(r);
+    }
+    return rows;
+  };
+  const plan = () => {
+    const rows = parse(), add = [], upd = [], skip = [];
+    for (const r of rows) {
+      let e = r.code && S.employees.find(x => (x.code || "").toUpperCase() === r.code);
+      if (!e && r.name) { const same = S.employees.filter(x => x.name === r.name); if (same.length === 1) e = same[0]; else if (same.length > 1) { skip.push(`${r.name}（系統有 ${same.length} 個同名，請手動填）`); continue; } }
+      if (e) upd.push([e, r]);
+      else if (r.name) add.push(r);
+      else skip.push(JSON.stringify(r));
+    }
+    return { rows, add, upd, skip };
+  };
+  const show = () => {
+    const { rows, add, upd, skip } = plan();
+    m.querySelector("#epPreview").innerHTML = `讀到 <b>${rows.length}</b> 行：更新 <b>${upd.length}</b> 人、新增 <b>${add.length}</b> 人${skip.length ? `、<span style="color:var(--warn)">${skip.length} 筆要手動處理：${skip.map(esc).join("、")}</span>` : ""}
+      ${add.length ? `<br>新增：${add.map(r => esc(r.name)).join("、")}` : ""}`;
+  };
+  m.onclick = async ev => {
+    const t = ev.target.closest("button"); if (!t) return;
+    if (t.id === "epCancel") return closeModal();
+    if (t.id === "epCheck") return show();
+    if (t.id !== "epGo") return;
+    const { add, upd } = plan();
+    const fallback = m.querySelector("#epBlock").value, allowAdd = m.querySelector("#epAdd").checked;
+    let list = S.employees.map(e => {
+      const hit = upd.find(([x]) => x.id === e.id); if (!hit) return e;
+      const r = hit[1];
+      return { ...e, code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
+    });
+    if (allowAdd) for (const r of add) list.push({
+      id: "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: r.name, code: r.code || "",
+      fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit) || fallback, active: true,
+    });
+    await saveEmps(list);
+    closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}`);
+  };
+}
+async function exportEmployees() {
+  const X = await loadXLSX();
+  const rows = [["工號", "公司代碼", "完整工號", "姓名", "時薪類別", "單位", "區塊", "啟用"]];
+  for (const b of blocks()) for (const e of S.employees.filter(x => x.block === b.key)) {
+    rows.push([e.code || "", CORP, e.fullCode || fullFromCode(e.code), e.name, e.wage || "", empUnit(e), b.name, e.active === false ? "停用" : "啟用"]);
+  }
+  const wb = X.utils.book_new();
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), "人員名單");
+  X.writeFile(wb, `智取店人員名單_${todayDs()}.xlsx`);
 }
