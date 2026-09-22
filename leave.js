@@ -1,5 +1,5 @@
 // 員工畫休頁：免登入，選自己的名字 → 在月曆上點日期畫休 → 送出
-import { createStore } from "./store.js";
+import { createStore } from "./store.js?v=3";
 
 const WD = ["一", "二", "三", "四", "五", "六", "日"];
 const CODES = { off: "休假", am: "只能早班", pm: "只能晚班", any: "早晚都可以" };
