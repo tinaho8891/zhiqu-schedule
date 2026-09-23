@@ -487,6 +487,7 @@ function onMainChange(e) {
   const t = e.target;
   if (t.id === "onlyMiss") { S.onlyMissing = t.checked; render(); return; }
   if (t.id === "lvYm" && t.value) { S.leaveYmSel = t.value; watchLeaveList(); render(); return; }
+  if (t.id === "empFile" && t.files[0]) { const f = t.files[0]; t.value = ""; return importEmpFile(f); }
   if (t.id === "dPick" && t.value) { goDay(t.value.replace(/-/g, "")); return; }
   if (t.id === "restoreFile") return importBackup(e);
   if (t.dataset.srename !== undefined) return renameStore(t.dataset.srename, t.value.trim());
@@ -949,77 +950,103 @@ function empCardHtml() {
       <button class="btn primary" id="addEmp">新增人員</button>
     </div>
     <div class="row" style="margin-bottom:8px">
+      <label class="btn primary" for="empFile">匯入 Excel 名單</label><input type="file" id="empFile" accept=".xlsx,.xls,.csv" hidden>
       <button class="btn" id="empPaste">批次貼上名單…</button>
       <button class="btn" id="empExport">匯出人員名單 Excel</button>
-      <span class="muted small">工號填 SPX 開頭，完整工號會自動帶成 ${CORP}+數字（可自己改）。</span>
+      <span class="muted small">Excel 欄位順序不拘，會自動認出工號／姓名／時薪類別／單位。</span>
     </div>
     <p class="muted small">離職的人把「啟用」取消就好，歷史班表會保留；按「刪」才會整筆刪掉。</p>
     ${sections}</div>`;
 }
-// 從 Excel／表格複製貼上，一次更新工號與新增人員
-function openEmpPaste() {
+// ---- 名單解析／比對（貼上與匯入 Excel 共用）----
+function rowFromCells(cells) {
+  const r = { code: "", full: "", name: "", wage: "", unit: "" };
+  for (const raw of cells) {
+    const c = String(raw ?? "").trim(); if (!c) continue;
+    if (/^SPX/i.test(c) && !r.code) r.code = c.toUpperCase();
+    else if (/^\d{8,}$/.test(c) && !r.full) r.full = c;
+    else if (/時薪|月薪/.test(c)) r.wage = c;
+    else if (/智取店|店早|店晚/.test(c)) r.unit = c;
+    else if (/^\d+$/.test(c)) { /* 公司代碼 8877 之類，略過 */ }
+    else if (!r.name && !/^\d/.test(c)) r.name = c;
+  }
+  return r;
+}
+function planRows(rows) {
+  const add = [], upd = [], skip = [];
+  for (const r of rows) {
+    let e = r.code && S.employees.find(x => (x.code || "").toUpperCase() === r.code);
+    if (!e && r.name) {
+      const same = S.employees.filter(x => x.name === r.name);
+      if (same.length === 1) e = same[0];
+      else if (same.length > 1) { skip.push(`${r.name}（系統有 ${same.length} 個同名，請手動填）`); continue; }
+    }
+    if (e) upd.push([e, r]); else if (r.name) add.push(r);
+  }
+  return { add, upd, skip };
+}
+function planHtml(rows) {
+  const { add, upd, skip } = planRows(rows);
+  return `讀到 <b>${rows.length}</b> 行：更新 <b>${upd.length}</b> 人、新增 <b>${add.length}</b> 人${skip.length ? `、<span style="color:var(--warn)">${skip.length} 筆要手動處理：${skip.map(esc).join("、")}</span>` : ""}
+    ${add.length ? `<br>新增：${add.map(r => esc(r.name)).join("、")}` : ""}`;
+}
+async function applyRows(rows, fallback, allowAdd) {
+  const { add, upd } = planRows(rows);
+  const list = S.employees.map(e => {
+    const hit = upd.find(([x]) => x.id === e.id); if (!hit) return e;
+    const r = hit[1];
+    return { ...e, code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
+  });
+  if (allowAdd) for (const r of add) list.push({
+    id: "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: r.name, code: r.code || "",
+    fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit) || fallback, active: true,
+  });
+  await saveEmps(list);
+  closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}`);
+}
+function planModal(title, sub, rows, body) {
   const blockOpts = blocks().map(x => `<option value="${x.key}">${esc(x.name)}</option>`).join("");
-  const m = openModal(`<h2>批次貼上名單</h2>
-    <div class="sub">從 Excel 或 Apollo 名單把資料整段複製，貼到下面（一行一個人，欄位順序不拘）。<br>
-      會自動認出：<b>SPX 工號</b>、<b>完整工號</b>、<b>姓名</b>、<b>時薪類別</b>、<b>單位</b>。</div>
-    <textarea id="epText" style="min-height:160px" placeholder="SPX36650	8877	887736650	程珮菁	早班時薪	新莊榮華 - 智取店早"></textarea>
+  const m = openModal(`<h2>${title}</h2><div class="sub">${sub}</div>${body || ""}
     <div class="row" style="margin-top:8px"><label class="small">認不出單位時，歸到<select id="epBlock">${blockOpts}</select></label>
       <label class="small"><input type="checkbox" id="epAdd" checked> 名單上有、系統沒有的人自動新增</label></div>
-    <div id="epPreview" class="small muted" style="margin-top:8px"></div>
-    <div class="actions"><button class="btn" id="epCheck">試算看看</button><span class="spacer"></span>
+    <div id="epPreview" class="small muted" style="margin-top:8px">${rows ? planHtml(rows) : ""}</div>
+    <div class="actions">${rows ? "" : `<button class="btn" id="epCheck">試算看看</button>`}<span class="spacer"></span>
       <button class="btn" id="epCancel">取消</button><button class="btn primary" id="epGo">套用</button></div>`);
-  const parse = () => {
+  return m;
+}
+// 直接匯入 Excel／CSV 名單
+async function importEmpFile(file) {
+  try {
+    const X = await loadXLSX();
+    const wb = X.read(await file.arrayBuffer(), { type: "array" });
     const rows = [];
-    for (const line of m.querySelector("#epText").value.split("\n")) {
-      const cells = line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean);
-      if (!cells.length) continue;
-      const r = { code: "", full: "", name: "", wage: "", unit: "" };
-      for (const c of cells) {
-        if (/^SPX/i.test(c) && !r.code) r.code = c.toUpperCase();
-        else if (/^\d{8,}$/.test(c)) r.full = c;
-        else if (/時薪|月薪/.test(c)) r.wage = c;
-        else if (/智取店|店早|店晚/.test(c)) r.unit = c;
-        else if (/^\d+$/.test(c)) { /* 公司代碼 8877 之類，略過 */ }
-        else if (!r.name && !/^\d/.test(c)) r.name = c;
+    for (const name of wb.SheetNames) {
+      for (const cells of X.utils.sheet_to_json(wb.Sheets[name], { header: 1, blankrows: false })) {
+        const r = rowFromCells(cells);
+        if ((r.name || r.code) && !/姓名|工號/.test(r.name)) rows.push(r);
       }
-      if (r.name || r.code) rows.push(r);
     }
-    return rows;
-  };
-  const plan = () => {
-    const rows = parse(), add = [], upd = [], skip = [];
-    for (const r of rows) {
-      let e = r.code && S.employees.find(x => (x.code || "").toUpperCase() === r.code);
-      if (!e && r.name) { const same = S.employees.filter(x => x.name === r.name); if (same.length === 1) e = same[0]; else if (same.length > 1) { skip.push(`${r.name}（系統有 ${same.length} 個同名，請手動填）`); continue; } }
-      if (e) upd.push([e, r]);
-      else if (r.name) add.push(r);
-      else skip.push(JSON.stringify(r));
-    }
-    return { rows, add, upd, skip };
-  };
-  const show = () => {
-    const { rows, add, upd, skip } = plan();
-    m.querySelector("#epPreview").innerHTML = `讀到 <b>${rows.length}</b> 行：更新 <b>${upd.length}</b> 人、新增 <b>${add.length}</b> 人${skip.length ? `、<span style="color:var(--warn)">${skip.length} 筆要手動處理：${skip.map(esc).join("、")}</span>` : ""}
-      ${add.length ? `<br>新增：${add.map(r => esc(r.name)).join("、")}` : ""}`;
-  };
+    if (!rows.length) return toast("這個檔案裡找不到人員資料");
+    const m = planModal("匯入 Excel 名單", `檔案：${esc(file.name)}<br>自動認出 SPX 工號、完整工號、姓名、時薪類別、單位。`, rows);
+    m.onclick = async ev => {
+      const t = ev.target.closest("button"); if (!t) return;
+      if (t.id === "epCancel") return closeModal();
+      if (t.id === "epGo") return applyRows(rows, m.querySelector("#epBlock").value, m.querySelector("#epAdd").checked);
+    };
+  } catch (e) { toast("讀取失敗：" + e.message); }
+}
+// 從 Excel／表格複製貼上，一次更新工號與新增人員
+function openEmpPaste() {
+  const m = planModal("批次貼上名單", "從 Excel 或 Apollo 名單把資料整段複製，貼到下面（一行一個人，欄位順序不拘）。<br>會自動認出：<b>SPX 工號</b>、<b>完整工號</b>、<b>姓名</b>、<b>時薪類別</b>、<b>單位</b>。", null,
+    `<textarea id="epText" style="min-height:160px" placeholder="SPX36650\t8877\t887736650\t程珮菁\t早班時薪\t新莊榮華 - 智取店早"></textarea>`);
+  const rows = () => m.querySelector("#epText").value.split("\n")
+    .map(line => rowFromCells(line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean)))
+    .filter(r => r.name || r.code);
   m.onclick = async ev => {
     const t = ev.target.closest("button"); if (!t) return;
     if (t.id === "epCancel") return closeModal();
-    if (t.id === "epCheck") return show();
-    if (t.id !== "epGo") return;
-    const { add, upd } = plan();
-    const fallback = m.querySelector("#epBlock").value, allowAdd = m.querySelector("#epAdd").checked;
-    let list = S.employees.map(e => {
-      const hit = upd.find(([x]) => x.id === e.id); if (!hit) return e;
-      const r = hit[1];
-      return { ...e, code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
-    });
-    if (allowAdd) for (const r of add) list.push({
-      id: "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: r.name, code: r.code || "",
-      fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit) || fallback, active: true,
-    });
-    await saveEmps(list);
-    closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}`);
+    if (t.id === "epCheck") { m.querySelector("#epPreview").innerHTML = planHtml(rows()); return; }
+    if (t.id === "epGo") return applyRows(rows(), m.querySelector("#epBlock").value, m.querySelector("#epAdd").checked);
   };
 }
 async function exportEmployees() {
