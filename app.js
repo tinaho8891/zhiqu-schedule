@@ -40,7 +40,7 @@ const hubs = () => S.master?.hubs || [];
 const blocks = () => S.master?.blocks || [];
 const blockBy = k => blocks().find(b => b.key === k);
 const hubName = id => hubs().find(h => h.id === id)?.name || id;
-function storeNames() { // 依組別順序排列
+function storeNames() { // 依母店順序排列
   const order = hubs().map(h => h.id);
   return [...(S.master?.stores || [])].sort((a, b) => order.indexOf(a.hub) - order.indexOf(b.hub)).map(s => s.name);
 }
@@ -344,7 +344,7 @@ function gridHtml() {
   <div class="row toolbar" style="margin-bottom:10px">${chips}</div>
   <div class="row toolbar" style="margin-bottom:10px">
     <input type="text" id="search" placeholder="搜尋姓名" value="${esc(S.search)}" style="width:140px">
-    <span class="muted small">第二列是「${SHIFT[b.shift]}」全區漏排店數（含其他組支援），點一下看是哪幾家。</span>
+    <span class="muted small">第二列是「${SHIFT[b.shift]}」全區漏排店數（含其他店支援），點一下看是哪幾家。</span>
     <span class="spacer"></span>
     ${isAdmin() ? `<button class="btn" id="copyWeek">複製週班表…</button>` : ""}
     <button class="btn" id="exportX">匯出 Excel</button>
@@ -408,10 +408,13 @@ function settingsHtml() {
   <div>
     <div class="card"><h3>門市（${stores.length} 家）</h3>
       <div class="row" style="margin-bottom:8px"><input type="text" id="newStore" placeholder="新門市名稱" style="width:120px"><select id="newStoreHub">${hubOpts()}</select><button class="btn primary" id="addStore">新增門市</button></div>
-      <table class="list"><tr><th>名稱（改名會自動記錄舊名對照）</th><th>組別</th><th></th></tr>${storeRows}</table>
+      <table class="list"><tr><th>名稱（改名會自動記錄舊名對照）</th><th>所屬店</th><th></th></tr>${storeRows}</table>
+      <h3 style="margin-top:16px">母店名稱</h3>
+      <div class="row">${hubs().map(h => `<input type="text" value="${esc(h.name)}" data-hname="${h.id}" style="width:120px">`).join("")}</div>
+      <p class="muted small">改這裡，網頁上所有地方（總覽、指派、單位）都會跟著改。</p>
     </div>
     <div class="card"><h3>錯字／舊名對照</h3>
-      <p class="muted small">一行一組，格式「寫法=正確門市」。排班格子裡出現左邊的字，會自動當成右邊的門市。</p>
+      <p class="muted small">一行一個，格式「寫法=正確門市」。排班格子裡出現左邊的字，會自動當成右邊的門市。</p>
       <textarea id="aliases">${esc(aliasText)}</textarea>
       <div class="row" style="margin-top:8px"><button class="btn primary" id="saveAliases">儲存對照表</button></div>
     </div>
@@ -492,6 +495,7 @@ function onMainChange(e) {
   if (t.id === "restoreFile") return importBackup(e);
   if (t.dataset.srename !== undefined) return renameStore(t.dataset.srename, t.value.trim());
   if (t.dataset.shub !== undefined) return patchStore(t.dataset.shub, { hub: t.value });
+  if (t.dataset.hname !== undefined) { const nm = t.value.trim(); if (!nm) return render(); return saveMaster({ ...S.master, hubs: hubs().map(h => h.id === t.dataset.hname ? { ...h, name: nm } : h) }); }
   if (t.dataset.ename) return patchEmp(t.dataset.ename, { name: t.value.trim() });
   if (t.dataset.ecode) { const c = t.value.trim().toUpperCase(); const e = empBy(t.dataset.ecode); return patchEmp(t.dataset.ecode, { code: c, fullCode: e?.fullCode && e.fullCode !== fullFromCode(e.code) ? e.fullCode : fullFromCode(c) }); }
   if (t.dataset.efull) return patchEmp(t.dataset.efull, { fullCode: t.value.trim() });
@@ -602,7 +606,7 @@ function openAssign(store, ds, sh) {
     m.innerHTML = `<h2>${esc(store)}・${dLabel(ds)} ${SHIFT[sh]}</h2>
       <div class="sub">${esc(hubName(hub))}｜${cur.length ? "目前負責：" + cur.map(x => esc(x.name)).join("、") : `<b style="color:var(--miss)">尚未有人負責</b>`}</div>
       ${cur.length && isAdmin() ? `<div class="row" style="margin-bottom:10px">${cur.map(x => `<button class="btn small danger" data-rm="${x.id}">把 ${esc(x.name)} 移除</button>`).join("")}</div>` : ""}
-      ${isAdmin() ? `<div class="pgroup">指派給（同組、今天上班、負責店數少的排前面）</div>
+      ${isAdmin() ? `<div class="pgroup">指派給（同店、今天上班、負責店數少的排前面）</div>
       <table class="list">${cands.map(c => `<tr><td><b>${esc(c.e.name)}</b>${avTag(c.av)} <span class="muted small">${esc(blockBy(c.e.block).name)}</span></td>
         <td>${c.p.stores.map(s => `<span class="st">${esc(s)}</span>`).join("") || `<span class="muted small">${lbl[c.status]}</span>`}</td>
         <td style="text-align:right"><button class="btn small ${c.status === 0 ? "primary" : ""}" data-add="${c.e.id}">指派</button></td></tr>`).join("")}</table>` : ""}
@@ -904,7 +908,7 @@ const CORP = "8877";
 // 區塊 → Apollo 單位名稱（例如 新莊榮華 - 智取店早）
 function unitOfBlock(key) {
   const b = blockBy(key); if (!b) return "";
-  const hub = hubName(b.hub).replace(/組$/, "");
+  const hub = hubName(b.hub).replace(/[組店]$/, "");
   return `新莊${hub} - 智取店${b.shift === "am" ? "早" : "晚"}`;
 }
 const empUnit = e => e.unit || unitOfBlock(e.block);
@@ -917,7 +921,7 @@ function fullFromCode(code) {
 function blockFromUnit(unit) {
   const t = String(unit || "");
   const shift = /晚/.test(t) ? "pm" : /早/.test(t) ? "am" : "";
-  const hub = hubs().find(h => t.includes(h.name.replace(/組$/, "")));
+  const hub = hubs().find(h => t.includes(h.name.replace(/[組店]$/, "")));
   if (!hub || !shift) return "";
   return blocks().find(b => b.hub === hub.id && b.shift === shift)?.key || "";
 }
