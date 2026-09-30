@@ -921,10 +921,16 @@ function fullFromCode(code) {
   return d ? CORP + d : "";
 }
 // 由單位文字判斷區塊（新莊榮華 - 智取店早 → rh_am）
-function blockFromUnit(unit) {
-  const t = String(unit || "");
-  const shift = /晚/.test(t) ? "pm" : /早/.test(t) ? "am" : "";
-  const hub = hubs().find(h => t.includes(h.name.replace(/[組店]$/, "")));
+function blockFromUnit(unit, wage) {
+  const t = String(unit || ""), w = String(wage || "");
+  const sh = x => /晚/.test(x) ? "pm" : /早/.test(x) ? "am" : "";
+  const shift = sh(t) || sh(w);
+  // 母店：單位文字含母店名；否則看含哪家門市（例：新莊中平店 → 中平 → 所屬母店）
+  let hub = hubs().find(h => t.includes(h.name.replace(/[組店]$/, "")));
+  if (!hub) {
+    const st = [...(S.master?.stores || [])].sort((a, b) => b.name.length - a.name.length).find(s => s.name && t.includes(s.name));
+    if (st) hub = hubs().find(h => h.id === st.hub);
+  }
   if (!hub || !shift) return "";
   return blocks().find(b => b.hub === hub.id && b.shift === shift)?.key || "";
 }
@@ -1006,11 +1012,11 @@ async function applyRows(rows, fallback, allowAdd, syncActive) {
     const hit = upd.find(([x]) => x.id === e.id);
     if (!hit) { if (syncActive && e.active !== false) { off++; return { ...e, active: false }; } return e; }
     const r = hit[1];
-    return { ...e, ...(syncActive ? { active: true } : {}), code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
+    return { ...e, ...(syncActive ? { active: true } : {}), code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: (/智取店/.test(r.unit) ? r.unit : "") || e.unit || r.unit || "", block: blockBy(e.block) ? (/智取店/.test(r.unit) && blockFromUnit(r.unit)) || e.block : blockFromUnit(r.unit, r.wage) || fallback };
   });
   if (allowAdd) for (const r of add) list.push({
     id: "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: r.name, code: r.code || "",
-    fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit) || fallback, active: true,
+    fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit, r.wage) || fallback, active: true,
   });
   await saveEmps(list);
   closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}${off ? `、停用 ${off} 人` : ""}`);
@@ -1052,7 +1058,7 @@ function openEmpPaste() {
     `<textarea id="epText" style="min-height:160px" placeholder="SPX36650\t8877\t887736650\t程珮菁\t早班時薪\t新莊榮華 - 智取店早"></textarea>`);
   const rows = () => {
     const txt = m.querySelector("#epText").value;
-    if (!/\t/.test(txt)) { const cards = rowsFromApolloText(txt); if (cards.length) return cards; }
+    if (!/\t/.test(txt)) { const a = rowsFromApolloText(txt), b = rowsFromApolloCards(txt); const best = a.length >= b.length ? a : b; if (best.length) return best; }
     return txt.split("\n")
       .map(line => rowFromCells(line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean)))
       .filter(r => r.name || r.code);
@@ -1104,7 +1110,7 @@ function runApolloPending() {
 // 小書籤本體（在 Apollo 頁面上執行）
 function apolloBookmarklet() {
   const site = siteBase();
-  const code = `(function(){var S=${JSON.stringify(site)};if(S.indexOf(location.host+'/')>=0){alert('請到 Apollo「我的部屬」頁面再點這個書籤。');return}function D(d){var a=[d];try{d.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)a=a.concat(D(f.contentDocument))}catch(e){}})}catch(e){}return a}var T=[],ds=D(document);ds.forEach(function(d){d.querySelectorAll('table').forEach(function(t){var R=[];t.querySelectorAll('tr').forEach(function(r){var c=[].map.call(r.querySelectorAll('th,td'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)});d.querySelectorAll('[role=grid],[role=table],[role=treegrid]').forEach(function(t){var R=[];t.querySelectorAll('[role=row]').forEach(function(r){var c=[].map.call(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader]'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)})});var n=0;T.forEach(function(t){n+=t.length});var X=ds.map(function(d){return d.body?d.body.innerText:''}).join('\\n');var p={v:1,from:location.host,tables:T,text:n<4?X.slice(0,40000):''};var w=window.open(S+'#apollo='+encodeURIComponent(JSON.stringify(p)),'_blank');if(!w)alert('瀏覽器擋住了新分頁，請允許這個網站開啟彈出視窗後再點一次。')})()`;
+  const code = `(function(){var S=${JSON.stringify(site)};if(S.indexOf(location.host+'/')>=0){alert('請到 Apollo「我的部屬」頁面再點這個書籤。');return}function D(d){var a=[d];try{d.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)a=a.concat(D(f.contentDocument))}catch(e){}})}catch(e){}return a}var T=[],ds=D(document);ds.forEach(function(d){d.querySelectorAll('table').forEach(function(t){var R=[];t.querySelectorAll('tr').forEach(function(r){var c=[].map.call(r.querySelectorAll('th,td'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)});d.querySelectorAll('[role=grid],[role=table],[role=treegrid]').forEach(function(t){var R=[];t.querySelectorAll('[role=row]').forEach(function(r){var c=[].map.call(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader]'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)})});var n=0;T.forEach(function(t){n+=t.length});var X=ds.map(function(d){return d.body?d.body.innerText:''}).join('\\n');var p={v:1,from:location.host,tables:T,text:X.slice(0,80000)};var w=window.open(S+'#apollo='+encodeURIComponent(JSON.stringify(p)),'_blank');if(!w)alert('瀏覽器擋住了新分頁，請允許這個網站開啟彈出視窗後再點一次。')})()`;
   return "javascript:" + encodeURIComponent(code);
 }
 function openApolloHelp() {
@@ -1175,6 +1181,26 @@ function rowsFromApolloText(text) {
   const seen = new Set();
   return out.filter(r => { const k = r.code || r.name; if (seen.has(k)) return false; seen.add(k); return true; });
 }
+// Apollo「我的部屬」卡片：姓名、部門（新莊中平店）、職稱「門市人員(早班時薪)」、分機、Email
+function rowsFromApolloCards(text) {
+  const L = String(text || "").split("\n").map(x => x.trim()).filter(Boolean);
+  const out = [], seen = new Set();
+  L.forEach((l, i) => {
+    if (!/(時薪|月薪)/.test(l) || l.length > 30) return;
+    // 往上找姓名（跳過部門那一行）
+    let name = "", unit = "";
+    for (let k = i - 1; k >= Math.max(0, i - 3); k--) {
+      if (NAME_RE.test(L[k]) && !/店$|部$|組$|課$|處$/.test(L[k])) { name = L[k]; unit = L.slice(k + 1, i).join(" "); break; }
+    }
+    if (!name || seen.has(name + unit)) return;
+    seen.add(name + unit);
+    const m = l.match(/[（(]([^)）]*(時薪|月薪)[^)）]*)[)）]/);
+    let wage = m ? m[1].trim() : (l.match(/(早班|晚班|假日|跑點)時薪|月薪/) || [""])[0];
+    const code = (L.slice(i + 1, i + 4).join(" ").match(CODE_RE) || [""])[0].toUpperCase();
+    out.push({ code, full: "", name, wage, unit, title: l });
+  });
+  return out;
+}
 function openApolloImport(p) {
   if (p.from === location.host) {
     const m = openModal(`<h2>要在 Apollo 頁面點小書籤</h2>
@@ -1188,7 +1214,7 @@ function openApolloImport(p) {
     return;
   }
   let rows = rowsFromTables(p.tables || []);
-  if (rows.length < 2 && p.text) { const t = rowsFromApolloText(p.text); if (t.length > rows.length) rows = t; }
+  if (p.text) for (const f of [rowsFromApolloText, rowsFromApolloCards]) { const t = f(p.text); if (t.length > rows.length) rows = t; }
   if (!rows.length) {
     const m = openModal(`<h2>Apollo 名單讀不到</h2>
       <div class="sub">小書籤有執行，但畫面上找不到人員名單。</div>
@@ -1201,7 +1227,7 @@ function openApolloImport(p) {
     m.onclick = ev => { const t = ev.target.closest("button"); if (!t) return; closeModal(); if (t.id === "apPaste") openEmpPaste(); };
     return;
   }
-  const bName = r => blockBy(blockFromUnit(r.unit))?.name || (planRows([r]).upd[0] ? "（維持原本）" : "");
+  const bName = r => { const e = planRows([r]).upd[0]?.[0]; if (e && blockBy(e.block)) return blockBy(e.block).name + "（原本）"; return blockBy(blockFromUnit(r.unit, r.wage))?.name || ""; };
   const table = `<div class="scrollx" style="max-height:260px;overflow:auto;margin-top:8px"><table class="list"><tr><th>#</th><th>姓名</th><th>工號</th><th>完整工號</th><th>時薪類別</th><th>單位</th><th>排到區塊</th></tr>
     ${rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${esc(r.code)}</td><td>${esc(r.full || fullFromCode(r.code))}</td><td>${esc(r.wage)}</td><td>${esc(r.unit)}</td><td>${bName(r) ? esc(bName(r)) : `<span class="muted">未分區</span>`}</td></tr>`).join("")}</table></div>
     <label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="epSync"> 同步在職狀態：Apollo 名單上<b>沒有</b>的人設為停用（歷史班表保留），名單上有的人重新啟用</label>`;
