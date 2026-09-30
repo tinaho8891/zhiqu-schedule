@@ -929,9 +929,9 @@ function blockFromUnit(unit) {
   return blocks().find(b => b.hub === hub.id && b.shift === shift)?.key || "";
 }
 function empRowsHtml(b) {
-  const blockOpts = sel => blocks().map(x => `<option value="${x.key}" ${x.key === sel ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+  const blockOpts = sel => (sel ? "" : `<option value="" selected>未分區</option>`) + blocks().map(x => `<option value="${x.key}" ${x.key === sel ? "selected" : ""}>${esc(x.name)}</option>`).join("");
   const wageOpts = sel => `<option value=""></option>` + WAGES.map(w => `<option ${w === sel ? "selected" : ""}>${esc(w)}</option>`).join("");
-  return S.employees.filter(e => e.block === b.key).map(e => `<tr>
+  return S.employees.filter(e => b.key ? e.block === b.key : !blockBy(e.block)).map(e => `<tr>
     <td><input type="text" value="${esc(e.name)}" data-ename="${e.id}" style="width:88px"></td>
     <td><input type="text" value="${esc(e.code || "")}" data-ecode="${e.id}" placeholder="SPX00000" style="width:92px"></td>
     <td><input type="text" value="${esc(e.fullCode || "")}" data-efull="${e.id}" placeholder="${CORP}…" style="width:104px"></td>
@@ -945,7 +945,8 @@ function empCardHtml() {
   const blockOpts = sel => blocks().map(x => `<option value="${x.key}" ${x.key === sel ? "selected" : ""}>${esc(x.name)}</option>`).join("");
   const wageOpts = () => `<option value="">時薪類別</option>` + WAGES.map(w => `<option>${esc(w)}</option>`).join("");
   const act = S.employees.filter(e => e.active !== false).length, noCode = S.employees.filter(e => e.active !== false && !e.code).length;
-  const sections = blocks().map(b => `<details ${b.key === S.block ? "open" : ""}><summary style="cursor:pointer;padding:6px 0;font-weight:500">${esc(b.name)}（${S.employees.filter(e => e.block === b.key).length}）</summary>
+  const loose = S.employees.filter(e => !blockBy(e.block)).length;
+  const sections = (loose ? [{ key: "", name: "未分區（請選區塊才會出現在排班表）" }] : []).concat(blocks()).map(b => `<details ${b.key === S.block || !b.key ? "open" : ""}><summary style="cursor:pointer;padding:6px 0;font-weight:500${b.key ? "" : ";color:var(--warn)"}">${esc(b.name)}（${b.key ? S.employees.filter(e => e.block === b.key).length : loose}）</summary>
       <div class="scrollx"><table class="list emp"><tr><th>姓名</th><th>工號</th><th>完整工號</th><th>時薪類別</th><th>區塊</th><th>單位</th><th>啟用</th><th></th></tr>
       ${empRowsHtml(b)}</table></div></details>`).join("");
   return `<div class="card"><h3>人員（啟用 ${act} 人${noCode ? `，其中 ${noCode} 人還沒填工號` : ""}）</h3>
@@ -1103,7 +1104,7 @@ function runApolloPending() {
 // 小書籤本體（在 Apollo 頁面上執行）
 function apolloBookmarklet() {
   const site = siteBase();
-  const code = `(function(){var S=${JSON.stringify(site)};function D(d){var a=[d];try{d.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)a=a.concat(D(f.contentDocument))}catch(e){}})}catch(e){}return a}var T=[],ds=D(document);ds.forEach(function(d){d.querySelectorAll('table').forEach(function(t){var R=[];t.querySelectorAll('tr').forEach(function(r){var c=[].map.call(r.querySelectorAll('th,td'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)});d.querySelectorAll('[role=grid],[role=table],[role=treegrid]').forEach(function(t){var R=[];t.querySelectorAll('[role=row]').forEach(function(r){var c=[].map.call(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader]'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)})});var n=0;T.forEach(function(t){n+=t.length});var X=ds.map(function(d){return d.body?d.body.innerText:''}).join('\\n');var p={v:1,from:location.host,tables:T,text:n<4?X.slice(0,40000):''};var w=window.open(S+'#apollo='+encodeURIComponent(JSON.stringify(p)),'_blank');if(!w)alert('瀏覽器擋住了新分頁，請允許這個網站開啟彈出視窗後再點一次。')})()`;
+  const code = `(function(){var S=${JSON.stringify(site)};if(S.indexOf(location.host+'/')>=0){alert('請到 Apollo「我的部屬」頁面再點這個書籤。');return}function D(d){var a=[d];try{d.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)a=a.concat(D(f.contentDocument))}catch(e){}})}catch(e){}return a}var T=[],ds=D(document);ds.forEach(function(d){d.querySelectorAll('table').forEach(function(t){var R=[];t.querySelectorAll('tr').forEach(function(r){var c=[].map.call(r.querySelectorAll('th,td'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)});d.querySelectorAll('[role=grid],[role=table],[role=treegrid]').forEach(function(t){var R=[];t.querySelectorAll('[role=row]').forEach(function(r){var c=[].map.call(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader]'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)})});var n=0;T.forEach(function(t){n+=t.length});var X=ds.map(function(d){return d.body?d.body.innerText:''}).join('\\n');var p={v:1,from:location.host,tables:T,text:n<4?X.slice(0,40000):''};var w=window.open(S+'#apollo='+encodeURIComponent(JSON.stringify(p)),'_blank');if(!w)alert('瀏覽器擋住了新分頁，請允許這個網站開啟彈出視窗後再點一次。')})()`;
   return "javascript:" + encodeURIComponent(code);
 }
 function openApolloHelp() {
@@ -1175,6 +1176,17 @@ function rowsFromApolloText(text) {
   return out.filter(r => { const k = r.code || r.name; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 function openApolloImport(p) {
+  if (p.from === location.host) {
+    const m = openModal(`<h2>要在 Apollo 頁面點小書籤</h2>
+      <div class="sub">剛剛是在「排班網站」上點了小書籤，所以讀到的是排班網站自己的畫面，不是 Apollo 名單。</div>
+      <ol class="small" style="padding-left:20px;line-height:1.8">
+        <li>切到 Apollo 分頁，打開「我的部屬」，等名單出現。</li>
+        <li>在 <b>Apollo 那一頁</b>點書籤列的「📥 Apollo→排班」。</li>
+      </ol>
+      <div class="actions"><span class="spacer"></span><button class="btn primary" id="apOk">知道了</button></div>`);
+    m.querySelector("#apOk").onclick = closeModal;
+    return;
+  }
   let rows = rowsFromTables(p.tables || []);
   if (rows.length < 2 && p.text) { const t = rowsFromApolloText(p.text); if (t.length > rows.length) rows = t; }
   if (!rows.length) {
@@ -1189,18 +1201,20 @@ function openApolloImport(p) {
     m.onclick = ev => { const t = ev.target.closest("button"); if (!t) return; closeModal(); if (t.id === "apPaste") openEmpPaste(); };
     return;
   }
-  const bName = r => blockBy(blockFromUnit(r.unit))?.name || "";
+  const bName = r => blockBy(blockFromUnit(r.unit))?.name || (planRows([r]).upd[0] ? "（維持原本）" : "");
   const table = `<div class="scrollx" style="max-height:260px;overflow:auto;margin-top:8px"><table class="list"><tr><th>#</th><th>姓名</th><th>工號</th><th>完整工號</th><th>時薪類別</th><th>單位</th><th>排到區塊</th></tr>
-    ${rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${esc(r.code)}</td><td>${esc(r.full || fullFromCode(r.code))}</td><td>${esc(r.wage)}</td><td>${esc(r.unit)}</td><td>${bName(r) ? esc(bName(r)) : `<span class="muted">（用下方預設）</span>`}</td></tr>`).join("")}</table></div>
+    ${rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${esc(r.code)}</td><td>${esc(r.full || fullFromCode(r.code))}</td><td>${esc(r.wage)}</td><td>${esc(r.unit)}</td><td>${bName(r) ? esc(bName(r)) : `<span class="muted">未分區</span>`}</td></tr>`).join("")}</table></div>
     <label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="epSync"> 同步在職狀態：Apollo 名單上<b>沒有</b>的人設為停用（歷史班表保留），名單上有的人重新啟用</label>`;
-  const m = planModal("從 Apollo 匯入人員", `從 ${esc(p.from || "Apollo")} 讀到 ${rows.length} 人，請確認下表無誤再按「套用」。`, rows, table);
+  const m = openModal(`<h2>從 Apollo 匯入人員</h2><div class="sub">從 Apollo 讀到 ${rows.length} 人。單位認得出來的會自動分到對應區塊，認不出來的先放「未分區」，之後在人員名單再調整就好。</div>
+    ${table}<div class="small muted" style="margin-top:8px">${planHtml(rows)}</div>
+    <div class="actions"><span class="spacer"></span><button class="btn" id="epCancel">取消</button><button class="btn primary" id="epGo">直接匯入</button></div>`);
   m.onclick = async ev => {
     const t = ev.target.closest("button"); if (!t) return;
     if (t.id === "epCancel") return closeModal();
     if (t.id === "epGo") {
       const sync = m.querySelector("#epSync").checked;
       if (sync) { const keep = new Set(planRows(rows).upd.map(([e]) => e.id)); const n = S.employees.filter(e => e.active !== false && !keep.has(e.id)).length; if (n && !confirm(`會把 ${n} 位不在 Apollo 名單上的人設為停用，確定嗎？`)) return; }
-      return applyRows(rows, m.querySelector("#epBlock").value, m.querySelector("#epAdd").checked, sync);
+      return applyRows(rows, "", true, sync);
     }
   };
 }
