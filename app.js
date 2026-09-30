@@ -96,6 +96,7 @@ function missingOf(A, ds, shift) {
 }
 
 /* ================= 啟動 ================= */
+grabApollo();
 init();
 async function init() {
   const now = new Date();
@@ -221,6 +222,7 @@ function render() {
   if (!canRead()) { main.innerHTML = gateHtml(); bindGate(); return; }
   if (S.master === undefined || S.employees === undefined) { main.innerHTML = `<div class="loading">載入資料中…</div>`; return; }
   if (!S.master || !S.employees) { main.innerHTML = setupHtml(); bindSetup(); return; }
+  if (S.apolloPending) setTimeout(runApolloPending, 0);
 
   // 保留捲動位置
   const sc = main.querySelector(".scroll");
@@ -478,6 +480,7 @@ function onMainClick(e) {
   if ((el = q("#saveAliases"))) return saveAliases();
   if ((el = q("#addEmp"))) return addEmp();
   if ((el = q("#empPaste"))) return openEmpPaste();
+  if ((el = q("#apolloHelp"))) return openApolloHelp();
   if ((el = q("#empExport"))) return exportEmployees();
   if ((el = q("[data-eup]"))) return moveEmp(el.dataset.eup, -1);
   if ((el = q("[data-edown]"))) return moveEmp(el.dataset.edown, 1);
@@ -955,6 +958,7 @@ function empCardHtml() {
     </div>
     <div class="row" style="margin-bottom:8px">
       <label class="btn primary" for="empFile">匯入 Excel 名單</label><input type="file" id="empFile" accept=".xlsx,.xls,.csv" hidden>
+      <button class="btn primary" id="apolloHelp">從 Apollo「我的部屬」匯入…</button>
       <button class="btn" id="empPaste">批次貼上名單…</button>
       <button class="btn" id="empExport">匯出人員名單 Excel</button>
       <span class="muted small">Excel 欄位順序不拘，會自動認出工號／姓名／時薪類別／單位。</span>
@@ -994,19 +998,21 @@ function planHtml(rows) {
   return `讀到 <b>${rows.length}</b> 行：更新 <b>${upd.length}</b> 人、新增 <b>${add.length}</b> 人${skip.length ? `、<span style="color:var(--warn)">${skip.length} 筆要手動處理：${skip.map(esc).join("、")}</span>` : ""}
     ${add.length ? `<br>新增：${add.map(r => esc(r.name)).join("、")}` : ""}`;
 }
-async function applyRows(rows, fallback, allowAdd) {
+async function applyRows(rows, fallback, allowAdd, syncActive) {
   const { add, upd } = planRows(rows);
+  let off = 0;
   const list = S.employees.map(e => {
-    const hit = upd.find(([x]) => x.id === e.id); if (!hit) return e;
+    const hit = upd.find(([x]) => x.id === e.id);
+    if (!hit) { if (syncActive && e.active !== false) { off++; return { ...e, active: false }; } return e; }
     const r = hit[1];
-    return { ...e, code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
+    return { ...e, ...(syncActive ? { active: true } : {}), code: r.code || e.code || "", fullCode: r.full || fullFromCode(r.code) || e.fullCode || "", wage: r.wage || e.wage || "", unit: r.unit || e.unit || "", block: blockFromUnit(r.unit) || e.block };
   });
   if (allowAdd) for (const r of add) list.push({
     id: "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: r.name, code: r.code || "",
     fullCode: r.full || fullFromCode(r.code), wage: r.wage || "", unit: r.unit || "", block: blockFromUnit(r.unit) || fallback, active: true,
   });
   await saveEmps(list);
-  closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}`);
+  closeModal(); toast(`已更新 ${upd.length} 人${allowAdd && add.length ? `、新增 ${add.length} 人` : ""}${off ? `、停用 ${off} 人` : ""}`);
 }
 function planModal(title, sub, rows, body) {
   const blockOpts = blocks().map(x => `<option value="${x.key}">${esc(x.name)}</option>`).join("");
@@ -1043,9 +1049,13 @@ async function importEmpFile(file) {
 function openEmpPaste() {
   const m = planModal("批次貼上名單", "從 Excel 或 Apollo 名單把資料整段複製，貼到下面（一行一個人，欄位順序不拘）。<br>會自動認出：<b>SPX 工號</b>、<b>完整工號</b>、<b>姓名</b>、<b>時薪類別</b>、<b>單位</b>。", null,
     `<textarea id="epText" style="min-height:160px" placeholder="SPX36650\t8877\t887736650\t程珮菁\t早班時薪\t新莊榮華 - 智取店早"></textarea>`);
-  const rows = () => m.querySelector("#epText").value.split("\n")
-    .map(line => rowFromCells(line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean)))
-    .filter(r => r.name || r.code);
+  const rows = () => {
+    const txt = m.querySelector("#epText").value;
+    if (!/\t/.test(txt)) { const cards = rowsFromApolloText(txt); if (cards.length) return cards; }
+    return txt.split("\n")
+      .map(line => rowFromCells(line.split(/[\t,]|\s{2,}/).map(x => x.trim()).filter(Boolean)))
+      .filter(r => r.name || r.code);
+  };
   m.onclick = async ev => {
     const t = ev.target.closest("button"); if (!t) return;
     if (t.id === "epCancel") return closeModal();
@@ -1062,4 +1072,135 @@ async function exportEmployees() {
   const wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), "人員名單");
   X.writeFile(wb, `智取店人員名單_${todayDs()}.xlsx`);
+}
+
+/* ================= Apollo「我的部屬」匯入 =================
+   做法：主管在自己的瀏覽器登入 Apollo、打開「我的部屬」，點書籤列上的「Apollo→排班」小書籤。
+   小書籤把頁面上的名單（表格或卡片文字）打包，開新分頁回到本網站（網址 #apollo=…），
+   網站讀到後顯示預覽，主管按「套用」才會寫入人員名單。帳密完全不經過本網站。 */
+const siteBase = () => location.href.split("#")[0].split("?")[0].replace(/[^/]*$/, "");
+function grabApollo() {
+  const h = location.hash;
+  if (h.startsWith("#apollo=")) {
+    const raw = h.slice(8);
+    try { sessionStorage.setItem("zq-apollo", raw); } catch {}
+    S.apolloPending = raw;
+    history.replaceState(null, "", location.pathname + location.search);
+  } else {
+    try { S.apolloPending = sessionStorage.getItem("zq-apollo") || null; } catch {}
+  }
+}
+function runApolloPending() {
+  const raw = S.apolloPending; if (!raw || !S.employees || !S.master) return;
+  if (!isAdmin()) { toast("要用管理者帳號登入才能匯入 Apollo 名單"); return; }
+  S.apolloPending = null;
+  try { sessionStorage.removeItem("zq-apollo"); } catch {}
+  let p;
+  try { p = JSON.parse(decodeURIComponent(raw)); } catch { try { p = JSON.parse(raw); } catch { return toast("Apollo 資料讀取失敗，請再點一次小書籤"); } }
+  if (S.tab !== "settings") setTab("settings");
+  openApolloImport(p);
+}
+// 小書籤本體（在 Apollo 頁面上執行）
+function apolloBookmarklet() {
+  const site = siteBase();
+  const code = `(function(){var S=${JSON.stringify(site)};function D(d){var a=[d];try{d.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)a=a.concat(D(f.contentDocument))}catch(e){}})}catch(e){}return a}var T=[],ds=D(document);ds.forEach(function(d){d.querySelectorAll('table').forEach(function(t){var R=[];t.querySelectorAll('tr').forEach(function(r){var c=[].map.call(r.querySelectorAll('th,td'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)});d.querySelectorAll('[role=grid],[role=table],[role=treegrid]').forEach(function(t){var R=[];t.querySelectorAll('[role=row]').forEach(function(r){var c=[].map.call(r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader]'),function(x){return (x.innerText||'').trim()});if(c.some(Boolean))R.push(c)});if(R.length)T.push(R)})});var n=0;T.forEach(function(t){n+=t.length});var X=ds.map(function(d){return d.body?d.body.innerText:''}).join('\\n');var p={v:1,from:location.host,tables:T,text:n<4?X.slice(0,40000):''};var w=window.open(S+'#apollo='+encodeURIComponent(JSON.stringify(p)),'_blank');if(!w)alert('瀏覽器擋住了新分頁，請允許這個網站開啟彈出視窗後再點一次。')})()`;
+  return "javascript:" + encodeURIComponent(code);
+}
+function openApolloHelp() {
+  const m = openModal(`<h2>從 Apollo「我的部屬」匯入人員</h2>
+    <div class="sub">第一次要先把小書籤放到書籤列（只要做一次），之後每次更新名單只要兩步。</div>
+    <p><b>第一次設定：</b>把下面這顆按鈕<b>用滑鼠拖到瀏覽器上方的書籤列</b>。<br>
+      <span class="small muted">看不到書籤列：Mac 按 ⌘+Shift+B、Windows 按 Ctrl+Shift+B。</span></p>
+    <p style="text-align:center;margin:14px 0"><a class="btn primary" id="apolloBm" href="${esc(apolloBookmarklet())}" draggable="true">📥 Apollo→排班</a></p>
+    <p><b>每次匯入：</b></p>
+    <ol class="small" style="padding-left:20px;line-height:1.8">
+      <li>用瀏覽器登入 Apollo，打開「我的部屬」名單（有分頁的話，把每頁筆數調到最大）。</li>
+      <li>點書籤列上的「📥 Apollo→排班」→ 會自動開回排班網站，先顯示預覽，確認後按「套用」。</li>
+    </ol>
+    <p class="small muted">小書籤只會讀取畫面上的名單，Apollo 帳號密碼不會經過排班網站。如果點了沒反應，可以在 Apollo 名單頁按 ⌘A（全選）→ ⌘C（複製），再到「批次貼上名單」貼上。</p>
+    <div class="actions"><span class="spacer"></span><button class="btn" id="bmClose">關閉</button></div>`);
+  m.querySelector("#apolloBm").onclick = e => { e.preventDefault(); toast("請把這顆按鈕拖到書籤列，不是在這裡點"); };
+  m.querySelector("#bmClose").onclick = closeModal;
+}
+// ---- 解析 ----
+const NAME_RE = /^[一-鿿·．]{2,6}$/;
+const CODE_RE = /SPX\d{3,}/i;
+function rowsFromTables(tables) {
+  // Ant Design 等表格常把表頭和內容拆成兩個 <table>：表頭只有 1 行時接到下一個表格
+  const ts = [];
+  for (let i = 0; i < tables.length; i++) {
+    const t = tables[i];
+    if (t.length === 1 && /姓名|工號|員工/.test(t[0].join(" ")) && tables[i + 1]) { ts.push([t[0], ...tables[i + 1]]); i++; }
+    else ts.push(t);
+  }
+  let best = [];
+  for (const t of ts) {
+    const hi = t.findIndex(r => r.some(c => /姓名/.test(c)));
+    const H = hi >= 0 ? t[hi] : [];
+    const col = re => H.findIndex(c => re.test(c));
+    const cName = H.findIndex(c => /^\s*(員工)?姓名\s*$/.test(c)), cUnit = col(/部門|單位|組織/), cWage = col(/薪/);
+    const rows = [];
+    for (const r of t.slice(hi + 1)) {
+      const pieces = r.flatMap(c => String(c).split(/\n|\s*[／/]\s*|\s{2,}/)).map(x => x.trim()).filter(Boolean);
+      const x = rowFromCells(pieces);
+      if (cName >= 0 && r[cName]) x.name = r[cName].split("\n")[0].trim();
+      if (cUnit >= 0 && r[cUnit]) x.unit = r[cUnit].split("\n")[0].trim();
+      if (cWage >= 0 && /薪/.test(r[cWage] || "")) x.wage = r[cWage].trim();
+      if (x.name && (x.code || x.full || NAME_RE.test(x.name))) rows.push(x);
+    }
+    if (rows.length > best.length) best = rows;
+  }
+  return best;
+}
+// 卡片式名單（每個欄位一行）：以 SPX 工號為錨點分組
+function rowsFromApolloText(text) {
+  const L = String(text || "").split("\n").map(x => x.trim()).filter(Boolean);
+  const idx = L.map((l, i) => CODE_RE.test(l) ? i : -1).filter(i => i >= 0);
+  if (!idx.length) return [];
+  // 判斷姓名在工號的前一行還是後一行（看多數）
+  let before = 0, after = 0;
+  for (const i of idx) { if (NAME_RE.test(L[i - 1] || "")) before++; if (NAME_RE.test(L[i + 1] || "")) after++; }
+  const back = before > after ? 1 : 0; // 每張卡片從姓名那行（或工號那行）開始
+  const starts = idx.map(i => Math.max(0, i - back));
+  const out = [];
+  idx.forEach((i, k) => {
+    const seg = L.slice(starts[k], k + 1 < starts.length ? starts[k + 1] : Math.min(L.length, starts[k] + 8));
+    const pieces = seg.flatMap(c => c.split(/\t|\s*[／/]\s*|\s{2,}|\s(?=SPX)|(?<=\d)\s(?=[一-鿿])/i)).map(x => x.trim()).filter(Boolean);
+    const r = rowFromCells(pieces);
+    const own = L[i].replace(CODE_RE, "").replace(/[()（）\s]/g, "");
+    if (NAME_RE.test(own)) r.name = own;
+    if (r.name) out.push(r);
+  });
+  const seen = new Set();
+  return out.filter(r => { const k = r.code || r.name; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+function openApolloImport(p) {
+  let rows = rowsFromTables(p.tables || []);
+  if (rows.length < 2 && p.text) { const t = rowsFromApolloText(p.text); if (t.length > rows.length) rows = t; }
+  if (!rows.length) {
+    const m = openModal(`<h2>Apollo 名單讀不到</h2>
+      <div class="sub">小書籤有執行，但畫面上找不到人員名單。</div>
+      <ul class="small" style="padding-left:20px;line-height:1.8">
+        <li>確認 Apollo 已經打開「我的部屬」，名單有顯示出來再點小書籤。</li>
+        <li>或在 Apollo 名單頁按 ⌘A → ⌘C，再到「批次貼上名單」貼上。</li>
+        <li>還是不行的話，把 Apollo「我的部屬」畫面截圖給 Claude，調整讀取方式。</li>
+      </ul>
+      <div class="actions"><span class="spacer"></span><button class="btn" id="apClose">關閉</button><button class="btn primary" id="apPaste">改用批次貼上</button></div>`);
+    m.onclick = ev => { const t = ev.target.closest("button"); if (!t) return; closeModal(); if (t.id === "apPaste") openEmpPaste(); };
+    return;
+  }
+  const bName = r => blockBy(blockFromUnit(r.unit))?.name || "";
+  const table = `<div class="scrollx" style="max-height:260px;overflow:auto;margin-top:8px"><table class="list"><tr><th>#</th><th>姓名</th><th>工號</th><th>完整工號</th><th>時薪類別</th><th>單位</th><th>排到區塊</th></tr>
+    ${rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${esc(r.code)}</td><td>${esc(r.full || fullFromCode(r.code))}</td><td>${esc(r.wage)}</td><td>${esc(r.unit)}</td><td>${bName(r) ? esc(bName(r)) : `<span class="muted">（用下方預設）</span>`}</td></tr>`).join("")}</table></div>
+    <label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="epSync"> 同步在職狀態：Apollo 名單上<b>沒有</b>的人設為停用（歷史班表保留），名單上有的人重新啟用</label>`;
+  const m = planModal("從 Apollo 匯入人員", `從 ${esc(p.from || "Apollo")} 讀到 ${rows.length} 人，請確認下表無誤再按「套用」。`, rows, table);
+  m.onclick = async ev => {
+    const t = ev.target.closest("button"); if (!t) return;
+    if (t.id === "epCancel") return closeModal();
+    if (t.id === "epGo") {
+      const sync = m.querySelector("#epSync").checked;
+      if (sync) { const keep = new Set(planRows(rows).upd.map(([e]) => e.id)); const n = S.employees.filter(e => e.active !== false && !keep.has(e.id)).length; if (n && !confirm(`會把 ${n} 位不在 Apollo 名單上的人設為停用，確定嗎？`)) return; }
+      return applyRows(rows, m.querySelector("#epBlock").value, m.querySelector("#epAdd").checked, sync);
+    }
+  };
 }
